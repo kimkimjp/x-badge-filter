@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      2.0.0
+// @version      2.1.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
@@ -30,7 +30,7 @@
 
   const STORAGE_KEY = 'xbf_settings';
   const USER_CACHE_MAX = 5000;
-  const MSG_TYPE = 'xbf-api-data';
+  const LOG_PREFIX = '[XBF]';
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -38,21 +38,32 @@
     whitelist: [],
   };
 
+  // Use the page's real window object (bypasses Tampermonkey sandbox)
+  const pageWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+  function log(...args) {
+    console.log(LOG_PREFIX, ...args);
+  }
+
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  Storage (localStorage-based)
+  //  Storage (localStorage-based, via page context)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const Storage = {
     get() {
       try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        const raw = pageWindow.localStorage.getItem(STORAGE_KEY);
         return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
       } catch {
         return { ...DEFAULT_SETTINGS };
       }
     },
     set(settings) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+      try {
+        pageWindow.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+      } catch (e) {
+        log('Storage.set error:', e);
+      }
     },
     addToWhitelist(handle) {
       const s = this.get();
@@ -143,23 +154,36 @@
         display: flex; align-items: center; justify-content: center;
         font-weight: 700; padding: 0 4px;
       }
+      .xbf-debug-banner {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 100000;
+        background: rgba(29, 155, 240, 0.9); color: #fff;
+        padding: 4px 12px; font-size: 11px; font-family: monospace;
+        text-align: center; pointer-events: none;
+        transition: opacity 0.5s;
+      }
     `;
     document.head.appendChild(style);
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  API Interceptor - Dual approach for maximum compatibility
+  //  API Interceptor via unsafeWindow
+  //  Patches the page's real fetch to intercept GraphQL responses
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const userCache = new Map();
   let apiAvailable = false;
 
-  // Approach 1: Direct fetch patch
-  function setupDirectFetchPatch() {
+  function setupFetchIntercept() {
     try {
-      const originalFetch = window.fetch;
-      window.fetch = async function (...args) {
-        const response = await originalFetch.apply(this, args);
+      const origFetch = pageWindow.fetch;
+      if (!origFetch) {
+        log('fetch not found on pageWindow');
+        return;
+      }
+
+      pageWindow.fetch = function (...args) {
+        const result = origFetch.apply(this, args);
+
         try {
           const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
           if (url.includes('/graphql/') && (
@@ -170,93 +194,29 @@
             url.includes('TweetDetail') ||
             url.includes('ListLatestTweetsTimeline')
           )) {
-            const clone = response.clone();
-            clone.json().then(data => {
-              const users = extractUsersFromApi(data);
-              if (users.length > 0) receiveApiUsers(users);
+            result.then(response => {
+              try {
+                const clone = response.clone();
+                clone.json().then(data => {
+                  const users = extractUsersFromApi(data);
+                  if (users.length > 0) {
+                    log('API intercepted:', users.length, 'users from', url.split('/').pop()?.split('?')[0]);
+                    receiveApiUsers(users);
+                  }
+                }).catch(() => {});
+              } catch (e) {}
+              return response;
             }).catch(() => {});
           }
         } catch (e) {}
-        return response;
-      };
-    } catch (e) {}
-  }
 
-  // Approach 2: Inject <script> tag into page context
-  function injectPageInterceptor() {
-    const script = document.createElement('script');
-    script.textContent = `(function() {
-      var MSG_TYPE = '${MSG_TYPE}';
-      var origFetch = window.fetch;
-      window.fetch = function() {
-        var args = arguments;
-        return origFetch.apply(this, args).then(function(response) {
-          try {
-            var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-            if (url.indexOf('/graphql/') !== -1 && (
-              url.indexOf('HomeTimeline') !== -1 ||
-              url.indexOf('HomeLatestTimeline') !== -1 ||
-              url.indexOf('SearchTimeline') !== -1 ||
-              url.indexOf('UserTweets') !== -1 ||
-              url.indexOf('TweetDetail') !== -1 ||
-              url.indexOf('ListLatestTweetsTimeline') !== -1
-            )) {
-              var clone = response.clone();
-              clone.json().then(function(data) {
-                var results = [];
-                var seen = {};
-                var stack = [data];
-                while (stack.length > 0) {
-                  var obj = stack.pop();
-                  if (!obj || typeof obj !== 'object') continue;
-                  if (obj.legacy && obj.rest_id) {
-                    var handle = (obj.legacy.screen_name || '').toLowerCase();
-                    if (handle && !seen[handle]) {
-                      seen[handle] = true;
-                      results.push({
-                        handle: handle,
-                        name: obj.legacy.name || '',
-                        following: obj.legacy.following === true
-                      });
-                    }
-                  }
-                  if (Array.isArray(obj)) {
-                    for (var i = obj.length - 1; i >= 0; i--) {
-                      if (obj[i] && typeof obj[i] === 'object') stack.push(obj[i]);
-                    }
-                  } else {
-                    var keys = Object.keys(obj);
-                    for (var j = keys.length - 1; j >= 0; j--) {
-                      var val = obj[keys[j]];
-                      if (val && typeof val === 'object') stack.push(val);
-                    }
-                  }
-                }
-                if (results.length > 0) {
-                  window.postMessage({ type: MSG_TYPE, users: results }, '*');
-                }
-              }).catch(function() {});
-            }
-          } catch(e) {}
-          return response;
-        });
+        return result;
       };
-    })();`;
-    const target = document.documentElement || document.head || document.body;
-    if (target) {
-      target.appendChild(script);
-      script.remove();
+
+      log('fetch interceptor installed on pageWindow');
+    } catch (e) {
+      log('fetch intercept setup failed:', e);
     }
-  }
-
-  // Listen for postMessage from injected script
-  function setupPostMessageListener() {
-    window.addEventListener('message', (e) => {
-      if (e.source !== window) return;
-      if (!e.data || e.data.type !== MSG_TYPE) return;
-      if (!Array.isArray(e.data.users)) return;
-      receiveApiUsers(e.data.users);
-    });
   }
 
   function receiveApiUsers(users) {
@@ -310,6 +270,55 @@
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  XHR Interceptor (backup for XMLHttpRequest-based requests)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function setupXhrIntercept() {
+    try {
+      const OrigXHR = pageWindow.XMLHttpRequest;
+      if (!OrigXHR) return;
+
+      pageWindow.XMLHttpRequest = function () {
+        const xhr = new OrigXHR();
+        const origOpen = xhr.open;
+        let capturedUrl = '';
+
+        xhr.open = function (method, url, ...rest) {
+          capturedUrl = url || '';
+          return origOpen.call(this, method, url, ...rest);
+        };
+
+        xhr.addEventListener('load', function () {
+          try {
+            if (capturedUrl.includes('/graphql/') && (
+              capturedUrl.includes('HomeTimeline') ||
+              capturedUrl.includes('HomeLatestTimeline') ||
+              capturedUrl.includes('SearchTimeline') ||
+              capturedUrl.includes('UserTweets') ||
+              capturedUrl.includes('TweetDetail') ||
+              capturedUrl.includes('ListLatestTweetsTimeline')
+            )) {
+              const data = JSON.parse(xhr.responseText);
+              const users = extractUsersFromApi(data);
+              if (users.length > 0) {
+                log('XHR intercepted:', users.length, 'users');
+                receiveApiUsers(users);
+              }
+            }
+          } catch (e) {}
+        });
+
+        return xhr;
+      };
+      pageWindow.XMLHttpRequest.prototype = OrigXHR.prototype;
+
+      log('XHR interceptor installed');
+    } catch (e) {
+      log('XHR intercept setup failed:', e);
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  DOM-based follow detection (fallback)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -339,7 +348,12 @@
 
   function initFilter() {
     settings = Storage.get();
-    if (!settings.enabled) return;
+    log('Settings loaded:', JSON.stringify(settings));
+
+    if (!settings.enabled) {
+      log('Filter is disabled');
+      return;
+    }
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => {
@@ -347,17 +361,20 @@
         setupUI();
         setupObserver();
         processExistingTweets();
+        showDebugBanner();
       });
     } else {
       injectStyles();
       setupUI();
       setupObserver();
       processExistingTweets();
+      showDebugBanner();
     }
 
-    // Timeout: if API hasn't responded, use DOM fallback
+    // Timeout: if API hasn't responded, use DOM fallback for pending tweets
     setTimeout(() => {
       if (!apiAvailable && pendingTweets.size > 0) {
+        log('API timeout - processing', pendingTweets.size, 'pending tweets with DOM fallback');
         const tweets = new Set(pendingTweets);
         pendingTweets.clear();
         for (const article of tweets) {
@@ -368,9 +385,35 @@
         }
       }
       if (!apiAvailable) {
+        log('API not available after timeout, reprocessing all tweets');
         processExistingTweets();
       }
     }, 5000);
+  }
+
+  function showDebugBanner() {
+    const banner = document.createElement('div');
+    banner.className = 'xbf-debug-banner';
+    banner.textContent = `XBF v2.1.0 | API: ${apiAvailable ? 'YES' : 'waiting...'} | Cache: ${userCache.size}`;
+    document.body.appendChild(banner);
+
+    // Update after API data arrives
+    const interval = setInterval(() => {
+      if (apiAvailable) {
+        banner.textContent = `XBF v2.1.0 | API: YES | Cache: ${userCache.size} | Hidden: ${hiddenCount}`;
+        setTimeout(() => { banner.style.opacity = '0'; }, 2000);
+        setTimeout(() => { banner.remove(); }, 2500);
+        clearInterval(interval);
+      }
+    }, 500);
+
+    // Auto-remove after 10s even without API
+    setTimeout(() => {
+      banner.textContent = `XBF v2.1.0 | API: ${apiAvailable ? 'YES' : 'NO (DOM fallback)'} | Hidden: ${hiddenCount}`;
+      setTimeout(() => { banner.style.opacity = '0'; }, 2000);
+      setTimeout(() => { banner.remove(); }, 2500);
+      clearInterval(interval);
+    }, 10000);
   }
 
   function processPendingTweets() {
@@ -387,6 +430,8 @@
     const target = document.querySelector(SELECTORS.timeline)
       || document.querySelector(SELECTORS.timelineFallback)
       || document.body;
+
+    log('Observer target:', target.tagName, target.dataset?.testid || '');
 
     observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
@@ -416,7 +461,9 @@
   }
 
   function processExistingTweets() {
-    document.querySelectorAll(SELECTORS.tweet).forEach(processTweet);
+    const tweets = document.querySelectorAll(SELECTORS.tweet);
+    log('Processing existing tweets:', tweets.length);
+    tweets.forEach(processTweet);
   }
 
   function processTweet(article) {
@@ -453,10 +500,12 @@
     } else {
       following = detectFollowFromDom(article);
       if (following === null && apiAvailable) {
+        // API is available but we don't have data for this user yet - wait
         pendingTweets.add(article);
         return;
       }
       if (following === null) {
+        // No API, no DOM info → assume not following (will hide badge users)
         following = false;
       }
     }
@@ -697,9 +746,15 @@
   //  Start
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  setupDirectFetchPatch();
-  injectPageInterceptor();
-  setupPostMessageListener();
+  log('X Badge Filter v2.1.0 starting');
+  log('unsafeWindow available:', typeof unsafeWindow !== 'undefined');
+  log('pageWindow === window:', pageWindow === window);
+
+  // Install API interceptors on the PAGE's real window
+  setupFetchIntercept();
+  setupXhrIntercept();
+
+  // Initialize the content filter
   initFilter();
 
 })();
