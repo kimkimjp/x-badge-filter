@@ -40,7 +40,7 @@
 
 Gitが使える場合：
 ```
-git clone <このリポジトリのURL>
+git clone https://github.com/kimkimjp/x-badge-filter.git
 ```
 
 Gitがわからない場合：
