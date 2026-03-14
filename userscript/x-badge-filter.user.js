@@ -102,7 +102,7 @@
       .xbf-settings-panel {
         position: fixed; bottom: 20px; right: 20px; z-index: 99999;
         background: #15202b; color: #e7e9ea; border-radius: 12px;
-        padding: 16px; width: 280px; font-family: system-ui, sans-serif;
+        padding: 16px; width: 280px; max-width: calc(100vw - 40px); font-family: system-ui, sans-serif;
         font-size: 14px; box-shadow: 0 4px 24px rgba(0,0,0,0.5);
         border: 1px solid #38444d; display: none;
       }
@@ -136,7 +136,7 @@
         background: none; border: none; color: #f4212e; cursor: pointer; font-size: 14px;
       }
       .xbf-fab {
-        position: fixed; bottom: 20px; right: 20px; z-index: 99998;
+        position: fixed; bottom: 80px; right: 20px; z-index: 99998;
         width: 40px; height: 40px; border-radius: 50%;
         background: #1d9bf0; color: #fff; border: none;
         font-size: 18px; cursor: pointer; display: flex;
@@ -260,12 +260,10 @@
     for (const btn of btns) {
       const text = btn.textContent.trim();
       // English and Japanese follow button texts
-      if (text === 'Follow' || text === 'フォロー') {
-        return false; // Has follow button = not following
-      }
-      if (text === 'Following' || text === 'フォロー中') {
-        return true;
-      }
+      if (text === 'Follow') return false;
+      if (text === 'Following') return true;
+      if (text === 'フォロー' && text.length === 4) return false;
+      if (text === 'フォロー中') return true;
     }
     // Check social context - "liked" / "retweeted by" someone you follow
     const context = article.querySelector(SELECTORS.socialContext);
@@ -558,7 +556,10 @@
     fab = document.createElement('button');
     fab.className = 'xbf-fab';
     fab.title = 'X Badge Filter';
-    fab.innerHTML = '<span style="font-size:16px;">XBF</span>';
+    const fabLabel = document.createElement('span');
+    fabLabel.style.fontSize = '16px';
+    fabLabel.textContent = 'XBF';
+    fab.appendChild(fabLabel);
     fabCount = document.createElement('span');
     fabCount.className = 'xbf-fab-count';
     fabCount.textContent = '0';
@@ -629,7 +630,7 @@
     wlList.style.cssText = 'max-height:100px;overflow-y:auto;margin-top:6px;';
 
     function renderWhitelist() {
-      wlList.innerHTML = '';
+      wlList.replaceChildren();
       for (const h of settings.whitelist) {
         const item = document.createElement('div');
         item.className = 'xbf-wl-item';
