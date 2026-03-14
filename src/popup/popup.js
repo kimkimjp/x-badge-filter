@@ -2,9 +2,6 @@
 
 const elements = {
   enabled: document.getElementById('enabled'),
-  filterBlue: document.getElementById('filterBlue'),
-  filterGold: document.getElementById('filterGold'),
-  filterGrey: document.getElementById('filterGrey'),
   showPlaceholder: document.getElementById('showPlaceholder'),
   whitelistInput: document.getElementById('whitelistInput'),
   addWhitelist: document.getElementById('addWhitelist'),
@@ -14,10 +11,9 @@ const elements = {
   statsText: document.getElementById('statsText'),
 };
 
-// Use shared constants (loaded from constants.js)
 const DEFAULT_SETTINGS = typeof XBF_DEFAULT_SETTINGS !== 'undefined'
   ? XBF_DEFAULT_SETTINGS
-  : { enabled: true, filterBlue: true, filterGold: false, filterGrey: false, showPlaceholder: true, whitelist: [] };
+  : { enabled: true, showPlaceholder: true, whitelist: [] };
 
 // ── Load settings ──
 async function loadSettings() {
@@ -25,9 +21,6 @@ async function loadSettings() {
   const settings = { ...DEFAULT_SETTINGS, ...(data.xbf_settings || {}) };
 
   elements.enabled.checked = settings.enabled;
-  elements.filterBlue.checked = settings.filterBlue;
-  elements.filterGold.checked = settings.filterGold;
-  elements.filterGrey.checked = settings.filterGrey;
   elements.showPlaceholder.checked = settings.showPlaceholder;
 
   updateSectionState(settings.enabled);
@@ -38,9 +31,6 @@ async function loadSettings() {
 async function saveSettings() {
   const settings = {
     enabled: elements.enabled.checked,
-    filterBlue: elements.filterBlue.checked,
-    filterGold: elements.filterGold.checked,
-    filterGrey: elements.filterGrey.checked,
     showPlaceholder: elements.showPlaceholder.checked,
     whitelist: await getWhitelist(),
   };
@@ -105,9 +95,6 @@ function escapeHtml(str) {
 
 // ── Event listeners ──
 elements.enabled.addEventListener('change', saveSettings);
-elements.filterBlue.addEventListener('change', saveSettings);
-elements.filterGold.addEventListener('change', saveSettings);
-elements.filterGrey.addEventListener('change', saveSettings);
 elements.showPlaceholder.addEventListener('change', saveSettings);
 elements.addWhitelist.addEventListener('click', addToWhitelist);
 elements.whitelistInput.addEventListener('keydown', (e) => {

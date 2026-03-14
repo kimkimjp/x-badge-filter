@@ -1,6 +1,8 @@
 // X Badge Filter - Main Content Script
 // Runs in ISOLATED world, listens for API data via postMessage,
 // observes DOM, filters tweets
+//
+// Logic: badge present + not following + not whitelisted → hide
 
 (function () {
   'use strict';
@@ -10,13 +12,13 @@
 
   // ── State ──
   let settings = { ...XBF_DEFAULT_SETTINGS };
-  let userCache = new Map(); // handle → { following, badgeType, name }
-  let pendingTweets = new Set(); // tweets waiting for API data
+  let userCache = new Map(); // handle → { following, name }
+  let pendingTweets = new Set();
   let hiddenCount = 0;
   let observer = null;
   let processingScheduled = false;
   let pendingNodes = [];
-  let apiAvailable = false; // Set true when first API data arrives via postMessage
+  let apiAvailable = false;
 
   // ── Initialize ──
   async function init() {
@@ -30,8 +32,7 @@
     processExistingTweets();
 
     // Timeout: if API interceptor hasn't sent data after 3s,
-    // it likely means "world": "MAIN" is not supported (Android browsers).
-    // Re-process pending tweets using DOM-based fallback.
+    // re-process pending tweets using DOM-based fallback.
     setTimeout(() => {
       if (!apiAvailable && pendingTweets.size > 0) {
         const tweets = new Set(pendingTweets);
@@ -47,10 +48,8 @@
   }
 
   // ── Listen for API interceptor data via postMessage ──
-  // P0 fix: postMessage works across MAIN and ISOLATED worlds
   function setupApiListener() {
     window.addEventListener('message', (e) => {
-      // Validate message origin and structure
       if (e.source !== window) return;
       if (!e.data || e.data.type !== MSG_TYPE) return;
       if (!Array.isArray(e.data.users)) return;
@@ -58,28 +57,15 @@
       apiAvailable = true;
 
       for (const user of e.data.users) {
-        // Validate user data structure
         if (typeof user.handle !== 'string' || !user.handle) continue;
-
-        let badgeType = null;
-        if (user.isBlueVerified) {
-          if (user.verifiedType === 'Business') {
-            badgeType = 'gold';
-          } else if (user.verifiedType === 'Government') {
-            badgeType = 'grey';
-          } else {
-            badgeType = 'blue';
-          }
-        }
 
         userCache.set(user.handle, {
           following: user.following === true,
-          badgeType,
           name: typeof user.name === 'string' ? user.name : '',
         });
       }
 
-      // P1 fix: Enforce cache size limit (LRU-like eviction)
+      // Enforce cache size limit
       if (userCache.size > USER_CACHE_MAX) {
         const excess = userCache.size - USER_CACHE_MAX;
         const iter = userCache.keys();
@@ -88,7 +74,6 @@
         }
       }
 
-      // P1 fix: Only re-process tweets that were pending API data
       processPendingTweets();
     });
   }
@@ -99,7 +84,6 @@
     const tweets = new Set(pendingTweets);
     pendingTweets.clear();
     for (const article of tweets) {
-      // Check if still in DOM
       if (document.contains(article)) {
         processTweet(article);
       }
@@ -122,7 +106,6 @@
           }
         }
       }
-      // P2 fix: Cap pendingNodes to prevent memory growth in background tabs
       if (pendingNodes.length > 500) {
         pendingNodes = pendingNodes.slice(-200);
       }
@@ -159,6 +142,7 @@
   }
 
   // ── Core: Process a single tweet ──
+  // Simple logic: badge present + not following + not whitelisted → hide
   function processTweet(article) {
     if (!settings.enabled) return;
     if (article.dataset.xbfProcessed === 'true') return;
@@ -175,7 +159,6 @@
     // Extract handle from the tweet
     const handle = extractHandle(article);
     if (!handle) {
-      // DOM not ready yet, add to pending
       pendingTweets.add(article);
       return;
     }
@@ -186,51 +169,25 @@
       return;
     }
 
-    // Check user cache (from API interceptor) or fall back to DOM detection
+    // Check follow status: API cache or DOM fallback
     const userData = userCache.get(handle);
     let following = null;
-    let badgeType = null;
 
     if (userData) {
-      // Path 1: API data available (most accurate)
       following = userData.following;
-      badgeType = userData.badgeType;
     } else {
-      // Path 2: No API data → DOM-based fallback
-      // This handles Android browsers where "world": "MAIN" is not supported
       following = detectFollowFromDom(article);
-      badgeType = detectBadgeTypeFromDom(badge);
 
       if (following === null && apiAvailable) {
-        // API is working but this user's data hasn't arrived yet
         pendingTweets.add(article);
         return;
       }
       if (following === null) {
-        // Neither API nor DOM can determine follow state → treat as not following
         following = false;
       }
     }
 
-    // If following, don't hide
     if (following) {
-      article.dataset.xbfProcessed = 'true';
-      return;
-    }
-
-    // Check badge type against filter settings
-    badgeType = badgeType || detectBadgeTypeFromDom(badge);
-    if (!badgeType) {
-      article.dataset.xbfProcessed = 'true';
-      return;
-    }
-
-    const shouldFilter =
-      (badgeType === 'blue' && settings.filterBlue) ||
-      (badgeType === 'gold' && settings.filterGold) ||
-      (badgeType === 'grey' && settings.filterGrey);
-
-    if (!shouldFilter) {
       article.dataset.xbfProcessed = 'true';
       return;
     }
@@ -258,72 +215,20 @@
     return null;
   }
 
-  // ── Detect follow status from DOM (fallback for Android/unsupported browsers) ──
+  // ── Detect follow status from DOM (fallback) ──
   function detectFollowFromDom(article) {
     const btns = article.querySelectorAll('[role="button"]');
     for (const btn of btns) {
       const text = (btn.textContent || '').trim();
-      // English
       if (text === 'Follow') return false;
       if (text === 'Following') return true;
-      // Japanese
       if (text === 'フォロー' && text.length === 4) return false;
       if (text === 'フォロー中') return true;
     }
-    return null; // Cannot determine
-  }
-
-  // ── Detect badge type from DOM (fallback when API data lacks badge info) ──
-  function detectBadgeTypeFromDom(badgeEl) {
-    try {
-      const svg = badgeEl.closest('svg') || badgeEl;
-      const paths = svg.querySelectorAll('path, circle');
-      for (const p of paths) {
-        const fill = p.getAttribute('fill');
-        if (!fill) continue;
-        const color = parseColor(fill);
-        if (!color) continue;
-        if (matchesColorRange(color, XBF_BADGE_COLORS.blue)) return 'blue';
-        if (matchesColorRange(color, XBF_BADGE_COLORS.gold)) return 'gold';
-        if (matchesColorRange(color, XBF_BADGE_COLORS.grey)) return 'grey';
-      }
-
-      const computed = window.getComputedStyle(svg);
-      const fillColor = computed.color || computed.fill;
-      if (fillColor) {
-        const color = parseColor(fillColor);
-        if (color) {
-          if (matchesColorRange(color, XBF_BADGE_COLORS.blue)) return 'blue';
-          if (matchesColorRange(color, XBF_BADGE_COLORS.gold)) return 'gold';
-          if (matchesColorRange(color, XBF_BADGE_COLORS.grey)) return 'grey';
-        }
-      }
-    } catch (e) {}
-    // P3 fix: Return null instead of defaulting to 'blue'
     return null;
-  }
-
-  function parseColor(str) {
-    if (!str) return null;
-    const rgbMatch = str.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (rgbMatch) {
-      return { r: parseInt(rgbMatch[1]), g: parseInt(rgbMatch[2]), b: parseInt(rgbMatch[3]) };
-    }
-    const hexMatch = str.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-    if (hexMatch) {
-      return { r: parseInt(hexMatch[1], 16), g: parseInt(hexMatch[2], 16), b: parseInt(hexMatch[3], 16) };
-    }
-    return null;
-  }
-
-  function matchesColorRange(color, range) {
-    return color.r >= range.r[0] && color.r <= range.r[1]
-      && color.g >= range.g[0] && color.g <= range.g[1]
-      && color.b >= range.b[0] && color.b <= range.b[1];
   }
 
   // ── Hide tweet ──
-  // P0 fix: Use createElement + textContent instead of innerHTML
   function hideTweet(article, handle, displayName) {
     const cell = article.closest(XBF_SELECTORS.cellInnerDiv);
     if (!cell) return;
