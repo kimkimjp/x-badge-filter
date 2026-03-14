@@ -1,0 +1,47 @@
+/* X Badge Filter - Content Script Styles */
+
+.xbf-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: rgb(113, 118, 123);
+  border-bottom: 1px solid rgb(47, 51, 54);
+  background: transparent;
+  flex-wrap: wrap;
+}
+
+.xbf-placeholder-text {
+  flex: 1;
+  min-width: 150px;
+}
+
+.xbf-placeholder button {
+  background: none;
+  border: 1px solid rgb(83, 100, 113);
+  color: rgb(139, 152, 165);
+  border-radius: 9999px;
+  padding: 2px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s, color 0.2s;
+}
+
+.xbf-placeholder button:hover {
+  background: rgba(29, 155, 240, 0.1);
+  color: rgb(29, 155, 240);
+  border-color: rgb(29, 155, 240);
+}
+
+/* Light theme support */
+@media (prefers-color-scheme: light) {
+  .xbf-placeholder {
+    border-bottom-color: rgb(239, 243, 244);
+  }
+  .xbf-placeholder button {
+    border-color: rgb(207, 217, 222);
+    color: rgb(83, 100, 113);
+  }
+}
