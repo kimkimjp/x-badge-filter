@@ -150,7 +150,7 @@
         background: none; border: none; color: #f4212e; cursor: pointer; font-size: 14px;
       }
       .xbf-fab {
-        position: fixed; bottom: 80px; right: 20px; z-index: 99998;
+        position: fixed; bottom: 150px; right: 20px; z-index: 99998;
         width: 48px; height: 48px; border-radius: 50%;
         background: #1d9bf0; color: #fff; border: none;
         font-size: 18px; cursor: pointer; display: flex;
