@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      1.0.0
+// @version      1.1.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
@@ -14,7 +14,7 @@
   'use strict';
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  Constants (from shared/constants.js)
+  //  Constants
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const SELECTORS = {
@@ -37,6 +37,7 @@
 
   const STORAGE_KEY = 'xbf_settings';
   const USER_CACHE_MAX = 5000;
+  const MSG_TYPE = 'xbf-api-data';
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -157,41 +158,153 @@
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  API Interceptor (same context, no postMessage needed)
+  //  API Interceptor - Dual approach for maximum compatibility
+  //  1. Direct fetch patch (works when @grant none gives true page context)
+  //  2. Injected <script> tag (works even if Tampermonkey sandboxes)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const userCache = new Map();
-  let onApiDataCallbacks = [];
+  let apiAvailable = false;
 
-  function setupApiInterceptor() {
-    const originalFetch = window.fetch;
-
-    window.fetch = async function (...args) {
-      const response = await originalFetch.apply(this, args);
-      try {
-        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-        if (url.includes('/graphql/') && (
-          url.includes('HomeTimeline') ||
-          url.includes('HomeLatestTimeline') ||
-          url.includes('SearchTimeline') ||
-          url.includes('UserTweets') ||
-          url.includes('TweetDetail') ||
-          url.includes('ListLatestTweetsTimeline')
-        )) {
-          const clone = response.clone();
-          clone.json().then(data => {
-            const users = extractUsers(data);
-            if (users.length > 0) {
-              processApiUsers(users);
-            }
-          }).catch(() => {});
-        }
-      } catch (e) {}
-      return response;
-    };
+  // Approach 1: Direct fetch patch (may or may not work depending on sandbox)
+  function setupDirectFetchPatch() {
+    try {
+      const originalFetch = window.fetch;
+      window.fetch = async function (...args) {
+        const response = await originalFetch.apply(this, args);
+        try {
+          const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+          if (url.includes('/graphql/') && (
+            url.includes('HomeTimeline') ||
+            url.includes('HomeLatestTimeline') ||
+            url.includes('SearchTimeline') ||
+            url.includes('UserTweets') ||
+            url.includes('TweetDetail') ||
+            url.includes('ListLatestTweetsTimeline')
+          )) {
+            const clone = response.clone();
+            clone.json().then(data => {
+              const users = extractUsersFromApi(data);
+              if (users.length > 0) {
+                receiveApiUsers(users);
+              }
+            }).catch(() => {});
+          }
+        } catch (e) {}
+        return response;
+      };
+    } catch (e) {}
   }
 
-  function extractUsers(rootObj) {
+  // Approach 2: Inject a <script> tag into the page context
+  // This bypasses any Tampermonkey sandbox and guarantees page-context execution
+  function injectPageInterceptor() {
+    const script = document.createElement('script');
+    script.textContent = `(function() {
+      var MSG_TYPE = '${MSG_TYPE}';
+      var origFetch = window.fetch;
+      window.fetch = function() {
+        var args = arguments;
+        return origFetch.apply(this, args).then(function(response) {
+          try {
+            var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+            if (url.indexOf('/graphql/') !== -1 && (
+              url.indexOf('HomeTimeline') !== -1 ||
+              url.indexOf('HomeLatestTimeline') !== -1 ||
+              url.indexOf('SearchTimeline') !== -1 ||
+              url.indexOf('UserTweets') !== -1 ||
+              url.indexOf('TweetDetail') !== -1 ||
+              url.indexOf('ListLatestTweetsTimeline') !== -1
+            )) {
+              var clone = response.clone();
+              clone.json().then(function(data) {
+                var results = [];
+                var seen = {};
+                var stack = [data];
+                while (stack.length > 0) {
+                  var obj = stack.pop();
+                  if (!obj || typeof obj !== 'object') continue;
+                  if (obj.legacy && obj.rest_id) {
+                    var handle = (obj.legacy.screen_name || '').toLowerCase();
+                    if (handle && !seen[handle]) {
+                      seen[handle] = true;
+                      results.push({
+                        handle: handle,
+                        name: obj.legacy.name || '',
+                        following: obj.legacy.following === true,
+                        isBlueVerified: obj.is_blue_verified === true,
+                        verifiedType: obj.legacy.verified_type || obj.verified_type || null
+                      });
+                    }
+                  }
+                  if (Array.isArray(obj)) {
+                    for (var i = obj.length - 1; i >= 0; i--) {
+                      if (obj[i] && typeof obj[i] === 'object') stack.push(obj[i]);
+                    }
+                  } else {
+                    var keys = Object.keys(obj);
+                    for (var j = keys.length - 1; j >= 0; j--) {
+                      var val = obj[keys[j]];
+                      if (val && typeof val === 'object') stack.push(val);
+                    }
+                  }
+                }
+                if (results.length > 0) {
+                  window.postMessage({ type: MSG_TYPE, users: results }, '*');
+                }
+              }).catch(function() {});
+            }
+          } catch(e) {}
+          return response;
+        });
+      };
+    })();`;
+    // Insert as early as possible
+    const target = document.documentElement || document.head || document.body;
+    if (target) {
+      target.appendChild(script);
+      script.remove(); // Clean up - the code has already executed
+    }
+  }
+
+  // Listen for postMessage from injected script
+  function setupPostMessageListener() {
+    window.addEventListener('message', (e) => {
+      if (e.source !== window) return;
+      if (!e.data || e.data.type !== MSG_TYPE) return;
+      if (!Array.isArray(e.data.users)) return;
+      receiveApiUsers(e.data.users);
+    });
+  }
+
+  // Process user data from either approach
+  function receiveApiUsers(users) {
+    apiAvailable = true;
+    for (const user of users) {
+      if (typeof user.handle !== 'string' || !user.handle) continue;
+      let badgeType = null;
+      if (user.isBlueVerified) {
+        if (user.verifiedType === 'Business') badgeType = 'gold';
+        else if (user.verifiedType === 'Government') badgeType = 'grey';
+        else badgeType = 'blue';
+      }
+      userCache.set(user.handle, {
+        following: user.following === true,
+        badgeType,
+        name: typeof user.name === 'string' ? user.name : '',
+      });
+    }
+    // Enforce cache size limit
+    if (userCache.size > USER_CACHE_MAX) {
+      const excess = userCache.size - USER_CACHE_MAX;
+      const iter = userCache.keys();
+      for (let i = 0; i < excess; i++) userCache.delete(iter.next().value);
+    }
+    // Re-process pending tweets
+    processPendingTweets();
+  }
+
+  function extractUsersFromApi(rootObj) {
     const results = [];
     const seen = new Set();
     const stack = [rootObj];
@@ -226,52 +339,109 @@
     return results;
   }
 
-  function processApiUsers(users) {
-    for (const user of users) {
-      let badgeType = null;
-      if (user.isBlueVerified) {
-        if (user.verifiedType === 'Business') badgeType = 'gold';
-        else if (user.verifiedType === 'Government') badgeType = 'grey';
-        else badgeType = 'blue';
-      }
-      userCache.set(user.handle, {
-        following: user.following,
-        badgeType,
-        name: user.name,
-      });
-    }
-    // Enforce cache size limit
-    if (userCache.size > USER_CACHE_MAX) {
-      const excess = userCache.size - USER_CACHE_MAX;
-      const iter = userCache.keys();
-      for (let i = 0; i < excess; i++) userCache.delete(iter.next().value);
-    }
-    // Notify content filter
-    for (const cb of onApiDataCallbacks) cb();
-  }
-
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  DOM-based follow detection (fallback for mobile)
+  //  DOM-based follow detection (fallback)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function detectFollowFromDom(article) {
-    // Check for "Follow" button (non-followed accounts have this)
     const btns = article.querySelectorAll('[role="button"]');
     for (const btn of btns) {
-      const text = btn.textContent.trim();
-      // English and Japanese follow button texts
+      const text = (btn.textContent || '').trim();
       if (text === 'Follow') return false;
       if (text === 'Following') return true;
       if (text === 'フォロー' && text.length === 4) return false;
       if (text === 'フォロー中') return true;
     }
-    // Check social context - "liked" / "retweeted by" someone you follow
-    const context = article.querySelector(SELECTORS.socialContext);
-    if (context) {
-      // If there's social context, tweet may be from non-followed but shown via engagement
-      return null; // Can't determine
-    }
-    return null; // Unknown
+    return null;
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Badge color detection (enhanced for mobile)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function detectBadgeTypeFromDom(badgeEl) {
+    try {
+      const svg = badgeEl.closest('svg') || badgeEl;
+
+      // Method 1: Check path/circle fill attributes
+      const paths = svg.querySelectorAll('path, circle');
+      for (const p of paths) {
+        const fill = p.getAttribute('fill');
+        if (!fill) continue;
+        const color = parseColor(fill);
+        if (!color) continue;
+        if (matchesColorRange(color, BADGE_COLORS.blue)) return 'blue';
+        if (matchesColorRange(color, BADGE_COLORS.gold)) return 'gold';
+        if (matchesColorRange(color, BADGE_COLORS.grey)) return 'grey';
+      }
+
+      // Method 2: Check computed style of SVG
+      const computed = window.getComputedStyle(svg);
+      const fillColor = computed.color || computed.fill;
+      if (fillColor) {
+        const color = parseColor(fillColor);
+        if (color) {
+          if (matchesColorRange(color, BADGE_COLORS.blue)) return 'blue';
+          if (matchesColorRange(color, BADGE_COLORS.gold)) return 'gold';
+          if (matchesColorRange(color, BADGE_COLORS.grey)) return 'grey';
+        }
+      }
+
+      // Method 3: Walk up parent elements looking for color
+      // (mobile may use currentColor inherited from parent)
+      let el = svg.parentElement;
+      for (let i = 0; i < 5 && el; i++) {
+        const parentStyle = window.getComputedStyle(el);
+        const parentColor = parentStyle.color;
+        if (parentColor) {
+          const color = parseColor(parentColor);
+          if (color) {
+            if (matchesColorRange(color, BADGE_COLORS.blue)) return 'blue';
+            if (matchesColorRange(color, BADGE_COLORS.gold)) return 'gold';
+            if (matchesColorRange(color, BADGE_COLORS.grey)) return 'grey';
+          }
+        }
+        el = el.parentElement;
+      }
+    } catch (e) {}
+
+    // Method 4: Check aria-label for badge type hints
+    try {
+      const label = badgeEl.getAttribute('aria-label')
+        || badgeEl.closest('[aria-label]')?.getAttribute('aria-label')
+        || '';
+      const lowerLabel = label.toLowerCase();
+      if (lowerLabel.includes('verified') || lowerLabel.includes('認証')) {
+        // If we found a verified badge but can't determine color,
+        // default to blue (most common case)
+        return 'blue';
+      }
+    } catch (e) {}
+
+    return null;
+  }
+
+  function parseColor(str) {
+    if (!str) return null;
+    // Match rgb(r, g, b)
+    const rgbMatch = str.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (rgbMatch) return { r: parseInt(rgbMatch[1]), g: parseInt(rgbMatch[2]), b: parseInt(rgbMatch[3]) };
+    // Match rgba(r, g, b, a)
+    const rgbaMatch = str.match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*[\d.]+\)/);
+    if (rgbaMatch) return { r: parseInt(rgbaMatch[1]), g: parseInt(rgbaMatch[2]), b: parseInt(rgbaMatch[3]) };
+    // Match #rrggbb
+    const hexMatch = str.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    if (hexMatch) return { r: parseInt(hexMatch[1], 16), g: parseInt(hexMatch[2], 16), b: parseInt(hexMatch[3], 16) };
+    // Match #rgb
+    const hex3Match = str.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/i);
+    if (hex3Match) return { r: parseInt(hex3Match[1] + hex3Match[1], 16), g: parseInt(hex3Match[2] + hex3Match[2], 16), b: parseInt(hex3Match[3] + hex3Match[3], 16) };
+    return null;
+  }
+
+  function matchesColorRange(color, range) {
+    return color.r >= range.r[0] && color.r <= range.r[1]
+      && color.g >= range.g[0] && color.g <= range.g[1]
+      && color.b >= range.b[0] && color.b <= range.b[1];
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -284,17 +454,10 @@
   let observer = null;
   let processingScheduled = false;
   let pendingNodes = [];
-  let apiAvailable = false;
 
   function initFilter() {
     settings = Storage.get();
     if (!settings.enabled) return;
-
-    // Register for API data updates
-    onApiDataCallbacks.push(() => {
-      apiAvailable = true;
-      processPendingTweets();
-    });
 
     // Wait for DOM to be ready
     if (document.readyState === 'loading') {
@@ -311,10 +474,21 @@
       processExistingTweets();
     }
 
-    // Check if API interception is working after a delay
+    // Timeout: if API interceptor hasn't sent data after 5s,
+    // re-process all pending tweets using DOM-based fallback
     setTimeout(() => {
+      if (!apiAvailable && pendingTweets.size > 0) {
+        const tweets = new Set(pendingTweets);
+        pendingTweets.clear();
+        for (const article of tweets) {
+          if (document.contains(article)) {
+            article.dataset.xbfProcessed = '';
+            processTweet(article);
+          }
+        }
+      }
+      // Also re-process existing tweets in case they were skipped
       if (!apiAvailable) {
-        // API intercept may not work (iOS Safari etc.), proceed with DOM-only mode
         processExistingTweets();
       }
     }, 5000);
@@ -397,7 +571,6 @@
       following = userData.following;
       badgeType = userData.badgeType;
     } else {
-      // DOM-based fallback (for mobile / when API intercept unavailable)
       following = detectFollowFromDom(article);
       badgeType = detectBadgeTypeFromDom(badge);
 
@@ -408,7 +581,6 @@
       }
       if (following === null) {
         // No API, no DOM indication - assume non-followed if badge present
-        // (conservative: may over-filter, but user can whitelist)
         following = false;
       }
     }
@@ -450,48 +622,6 @@
       }
     }
     return null;
-  }
-
-  function detectBadgeTypeFromDom(badgeEl) {
-    try {
-      const svg = badgeEl.closest('svg') || badgeEl;
-      const paths = svg.querySelectorAll('path, circle');
-      for (const p of paths) {
-        const fill = p.getAttribute('fill');
-        if (!fill) continue;
-        const color = parseColor(fill);
-        if (!color) continue;
-        if (matchesColorRange(color, BADGE_COLORS.blue)) return 'blue';
-        if (matchesColorRange(color, BADGE_COLORS.gold)) return 'gold';
-        if (matchesColorRange(color, BADGE_COLORS.grey)) return 'grey';
-      }
-      const computed = window.getComputedStyle(svg);
-      const fillColor = computed.color || computed.fill;
-      if (fillColor) {
-        const color = parseColor(fillColor);
-        if (color) {
-          if (matchesColorRange(color, BADGE_COLORS.blue)) return 'blue';
-          if (matchesColorRange(color, BADGE_COLORS.gold)) return 'gold';
-          if (matchesColorRange(color, BADGE_COLORS.grey)) return 'grey';
-        }
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  function parseColor(str) {
-    if (!str) return null;
-    const rgbMatch = str.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (rgbMatch) return { r: parseInt(rgbMatch[1]), g: parseInt(rgbMatch[2]), b: parseInt(rgbMatch[3]) };
-    const hexMatch = str.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-    if (hexMatch) return { r: parseInt(hexMatch[1], 16), g: parseInt(hexMatch[2], 16), b: parseInt(hexMatch[3], 16) };
-    return null;
-  }
-
-  function matchesColorRange(color, range) {
-    return color.r >= range.r[0] && color.r <= range.r[1]
-      && color.g >= range.g[0] && color.g <= range.g[1]
-      && color.b >= range.b[0] && color.b <= range.b[1];
   }
 
   function hideTweet(article, handle) {
@@ -544,7 +674,7 @@
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  Floating Settings UI (replaces popup)
+  //  Floating Settings UI
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   let fab = null;
@@ -571,7 +701,6 @@
     // Settings panel
     panel = document.createElement('div');
     panel.className = 'xbf-settings-panel';
-    panel.innerHTML = ''; // Built with createElement below
 
     const title = document.createElement('h3');
     title.textContent = 'X Badge Filter';
@@ -721,9 +850,17 @@
   //  Start
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  // API interceptor must run at document-start (before Twitter's fetch calls)
-  setupApiInterceptor();
-  // Content filter initializes when DOM is ready
+  // 1. Try direct fetch patch (works when @grant none gives true page context)
+  setupDirectFetchPatch();
+
+  // 2. Inject <script> tag for page-context fetch interception
+  //    (works even if Tampermonkey sandboxes the userscript)
+  injectPageInterceptor();
+
+  // 3. Listen for postMessage from injected script
+  setupPostMessageListener();
+
+  // 4. Initialize content filter (waits for DOM ready)
   initFilter();
 
 })();
