@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      2.4.0
+// @version      2.5.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
@@ -12,6 +12,18 @@
 
 (function () {
   'use strict';
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Phase 0: CSS Pre-hiding (MUST be first)
+  //  Hides unprocessed timeline cells before they render.
+  //  Prevents badge tweets from flashing before filter runs.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const preHideStyle = document.createElement('style');
+  preHideStyle.id = 'xbf-prehide';
+  preHideStyle.textContent =
+    '[data-testid="cellInnerDiv"]:not([data-xbf-ok]) { visibility: hidden !important; }';
+  (document.head || document.documentElement).appendChild(preHideStyle);
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Constants
@@ -33,6 +45,7 @@
   const USER_CACHE_MAX = 5000;
   const LOG_PREFIX = '[XBF]';
   const RESCAN_INTERVAL = 3000;
+  const SAFETY_TIMEOUT = 3000;
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -255,19 +268,12 @@
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function extractHandle(article) {
-    // Strategy 1: data-testid="User-Name"
     let handle = extractHandleFromUserName(article, SELECTORS.userName);
     if (handle) return handle;
-
-    // Strategy 2: data-testid="User-Names"
     handle = extractHandleFromUserName(article, SELECTORS.userNameAlt);
     if (handle) return handle;
-
-    // Strategy 3: Profile links
     handle = extractHandleFromLinks(article);
     if (handle) return handle;
-
-    // Strategy 4: @username text
     handle = extractHandleFromText(article);
     return handle;
   }
@@ -322,12 +328,10 @@
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function detectFollowFromDom(article, handle) {
-    // Strategy 1: Find follow button near User-Name area
     const userNameArea = article.querySelector(SELECTORS.userName)
       || article.querySelector(SELECTORS.userNameAlt);
 
     if (userNameArea) {
-      // Walk up from User-Name to find the header row containing the follow button
       let headerRow = userNameArea.parentElement;
       for (let i = 0; i < 3 && headerRow && headerRow !== article; i++) {
         const result = checkFollowButtons(headerRow);
@@ -336,7 +340,6 @@
       }
     }
 
-    // Strategy 2: Find follow button near the author's profile link
     if (handle) {
       const profileLinks = article.querySelectorAll(`a[href="/${handle}" i], a[href="/${handle}"]`);
       for (const link of profileLinks) {
@@ -349,7 +352,6 @@
       }
     }
 
-    // DO NOT search entire article — that would match RT/quote follow buttons
     return null;
   }
 
@@ -357,7 +359,6 @@
     const btns = container.querySelectorAll('[role="button"]');
     for (const btn of btns) {
       const text = (btn.textContent || '').trim();
-      // Only match exact follow/following button text
       if (text === 'Follow' || (text === 'フォロー' && text.length === 4)) return false;
       if (text === 'Following' || text === 'フォロー中') return true;
     }
@@ -369,33 +370,54 @@
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function getTweetKey(article) {
-    // Use permalink (/user/status/id) as unique tweet identifier
     const statusLink = article.querySelector('a[href*="/status/"]');
     if (statusLink) return statusLink.getAttribute('href');
-    // Fallback: first 80 chars of text content
     return (article.textContent || '').slice(0, 80);
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Cell Processing - mark cells as OK to reveal
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function markCellOk(article) {
+    const cell = article.closest(SELECTORS.cellInnerDiv);
+    if (cell) cell.setAttribute('data-xbf-ok', '');
+  }
+
+  function markCellOkDirect(cell) {
+    cell.setAttribute('data-xbf-ok', '');
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Content Filter
   //  Logic: badge present + not following + not whitelisted → hide
+  //
+  //  Processing strategy for zero-flash:
+  //  Stage A (synchronous in MO callback): quick badge check
+  //    - No article → mark cell OK immediately
+  //    - Article, no badge → mark cell OK immediately
+  //  Stage B (queueMicrotask): full follow/whitelist check
+  //    - Runs before browser paint, but after MO callback
+  //    - Decides hide or show
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   let settings = DEFAULT_SETTINGS;
   let pendingTweets = new Set();
   let hiddenCount = 0;
   let observer = null;
-  let processingScheduled = false;
-  let pendingNodes = [];
   let badgeFoundCount = 0;
   let followSkipCount = 0;
   let lastUrl = '';
 
   function initFilter() {
     settings = Storage.get();
-    log('v2.4.0 | enabled=' + settings.enabled);
+    log('v2.5.0 | enabled=' + settings.enabled + ' | pre-hide active');
 
-    if (!settings.enabled) return;
+    if (!settings.enabled) {
+      // Remove pre-hiding CSS if disabled
+      removePreHideCSS();
+      return;
+    }
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', onDomReady);
@@ -404,28 +426,45 @@
     }
   }
 
+  function removePreHideCSS() {
+    const el = document.getElementById('xbf-prehide');
+    if (el) el.remove();
+  }
+
   function onDomReady() {
     log('DOM ready');
     injectStyles();
     setupUI();
     setupObserver();
-    processExistingTweets();
+    processExistingCells();
     lastUrl = location.href;
 
-    // Periodic re-scan: catches SPA navigations, DOM reuse, new tweets
+    // Periodic re-scan + safety timeout for unprocessed cells
     setInterval(() => {
       if (!settings.enabled) return;
 
-      // Detect SPA navigation (URL changed without page reload)
+      // SPA navigation detection
       if (location.href !== lastUrl) {
         log('SPA navigation: ' + lastUrl + ' → ' + location.href);
         lastUrl = location.href;
-        // Re-setup observer in case timeline element was replaced
         setupObserver();
       }
 
-      processExistingTweets();
+      processExistingCells();
+      releaseStaleCells();
     }, RESCAN_INTERVAL);
+  }
+
+  // ── Safety valve: force-show cells stuck without data-xbf-ok ──
+  function releaseStaleCells() {
+    const now = Date.now();
+    const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]:not([data-xbf-ok])');
+    for (const cell of cells) {
+      const ts = parseInt(cell.dataset.xbfTs || '0', 10);
+      if (ts > 0 && (now - ts) > SAFETY_TIMEOUT) {
+        markCellOkDirect(cell);
+      }
+    }
   }
 
   function processPendingTweets() {
@@ -437,77 +476,120 @@
     }
   }
 
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  MutationObserver - SYNCHRONOUS cell processing
+  //  No requestAnimationFrame deferral.
+  //  Process cells immediately to prevent flash.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
   function setupObserver() {
     if (observer) observer.disconnect();
 
-    // Always observe document.body for SPA safety
-    // (timeline elements can be destroyed/recreated during navigation)
     observer = new MutationObserver((mutations) => {
+      if (!settings.enabled) return;
+
       for (const mutation of mutations) {
+        // Handle added nodes: find and process new cells
         for (const node of mutation.addedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE) pendingNodes.push(node);
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          processNewNode(node);
+        }
+
+        // Handle DOM reuse: if children of a cellInnerDiv changed,
+        // re-check the cell (React may have swapped tweet content)
+        if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
+          const cell = mutation.target.closest?.('[data-testid="cellInnerDiv"]');
+          if (cell && cell.hasAttribute('data-xbf-ok')) {
+            // Content changed in a previously processed cell → re-process
+            cell.removeAttribute('data-xbf-ok');
+            const article = cell.querySelector(SELECTORS.tweet)
+              || cell.querySelector(SELECTORS.tweetFallback);
+            if (article) {
+              article.dataset.xbfProcessed = '';
+              article.dataset.xbfTweetKey = '';
+            }
+            processNewNode(cell);
+          }
         }
       }
-      if (pendingNodes.length > 500) pendingNodes = pendingNodes.slice(-200);
-      scheduleProcessing();
     });
+
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  function scheduleProcessing() {
-    if (processingScheduled) return;
-    processingScheduled = true;
-    requestAnimationFrame(() => {
-      const nodes = pendingNodes.splice(0);
-      for (const node of nodes) {
-        let tweets = node.matches?.(SELECTORS.tweet)
-          ? [node]
-          : Array.from(node.querySelectorAll?.(SELECTORS.tweet) || []);
-        if (tweets.length === 0 && node.querySelectorAll) {
-          tweets = Array.from(node.querySelectorAll(SELECTORS.tweetFallback) || []);
-        }
-        for (const tweet of tweets) processTweet(tweet);
+  // ── Stage A: Synchronous quick check ──
+  // Runs inside MutationObserver callback (before browser paint).
+  // For each cellInnerDiv:
+  //   - No article → mark OK (non-tweet cell, show immediately)
+  //   - Article, no badge → mark OK (safe tweet, show immediately)
+  //   - Article + badge → defer to Stage B via queueMicrotask
+  function processNewNode(node) {
+    // Collect cellInnerDiv elements
+    const cells = [];
+    if (node.matches?.('[data-testid="cellInnerDiv"]')) {
+      cells.push(node);
+    } else if (node.querySelectorAll) {
+      const found = node.querySelectorAll('[data-testid="cellInnerDiv"]');
+      for (let i = 0; i < found.length; i++) cells.push(found[i]);
+    }
+
+    for (const cell of cells) {
+      if (cell.hasAttribute('data-xbf-ok')) continue;
+
+      // Timestamp for safety timeout
+      if (!cell.dataset.xbfTs) {
+        cell.dataset.xbfTs = String(Date.now());
       }
-      processingScheduled = false;
-    });
+
+      const article = cell.querySelector(SELECTORS.tweet)
+        || cell.querySelector(SELECTORS.tweetFallback);
+
+      if (!article) {
+        // Non-tweet cell (promotions, topics, etc.) → show immediately
+        markCellOkDirect(cell);
+        continue;
+      }
+
+      // Quick badge check (synchronous, very fast)
+      const badge = article.querySelector(SELECTORS.verifiedBadge)
+        || article.querySelector(SELECTORS.verifiedBadgeFallback);
+
+      if (!badge) {
+        // No badge → safe to show
+        article.dataset.xbfProcessed = 'true';
+        markCellOkDirect(cell);
+        continue;
+      }
+
+      // Badge found → need full check (handle, follow, whitelist)
+      // Use queueMicrotask to avoid blocking but still run BEFORE paint
+      queueMicrotask(() => {
+        processVerifiedTweet(cell, article);
+      });
+    }
+
+    // Also handle articles that aren't inside a cellInnerDiv (edge case)
+    if (cells.length === 0) {
+      const articles = node.matches?.(SELECTORS.tweet)
+        ? [node]
+        : Array.from(node.querySelectorAll?.(SELECTORS.tweet) || []);
+      for (const article of articles) {
+        processTweet(article);
+      }
+    }
   }
 
-  function processExistingTweets() {
-    let tweets = document.querySelectorAll(SELECTORS.tweet);
-    if (tweets.length === 0) {
-      tweets = document.querySelectorAll(SELECTORS.tweetFallback);
-    }
-    tweets.forEach(processTweet);
-  }
-
-  function processTweet(article) {
-    if (!settings.enabled) return;
-
-    // Detect React DOM reuse: same DOM element, different tweet content
-    const currentKey = getTweetKey(article);
-    const previousKey = article.dataset.xbfTweetKey || '';
-
-    if (article.dataset.xbfProcessed === 'true') {
-      if (currentKey === previousKey) return; // Same tweet, already processed
-      // Different tweet in same DOM element → reset and re-process
-      resetArticle(article);
-    }
-
-    article.dataset.xbfTweetKey = currentKey;
-
-    // Check for verified badge
-    const badge = article.querySelector(SELECTORS.verifiedBadge)
-      || article.querySelector(SELECTORS.verifiedBadgeFallback);
-    if (!badge) {
-      article.dataset.xbfProcessed = 'true';
-      return;
-    }
+  // ── Stage B: Full verification for badge tweets ──
+  // Runs as microtask (before paint, after MO callback)
+  function processVerifiedTweet(cell, article) {
+    if (cell.hasAttribute('data-xbf-ok')) return;
 
     badgeFoundCount++;
 
     // Extract handle
     const handle = extractHandle(article);
     if (!handle) {
+      // Can't extract handle yet → add to pending, keep hidden
       pendingTweets.add(article);
       return;
     }
@@ -515,6 +597,7 @@
     // Check whitelist
     if (settings.whitelist.includes(handle)) {
       article.dataset.xbfProcessed = 'true';
+      markCellOkDirect(cell);
       return;
     }
 
@@ -525,14 +608,12 @@
     if (userData) {
       following = userData.following;
     } else {
-      // Only check buttons near the tweet AUTHOR, not the entire article
       following = detectFollowFromDom(article, handle);
       if (following === null && apiAvailable) {
         pendingTweets.add(article);
         return;
       }
       if (following === null) {
-        // No API, no author-specific follow button → assume not following
         following = false;
       }
     }
@@ -540,21 +621,108 @@
     if (following) {
       followSkipCount++;
       article.dataset.xbfProcessed = 'true';
+      markCellOkDirect(cell);
       return;
     }
 
     // Badge + not following + not whitelisted → hide
-    hideTweet(article, handle);
+    hideTweet(article, handle, cell);
+    article.dataset.xbfProcessed = 'true';
+  }
+
+  // ── Process existing cells (for initial load and periodic rescan) ──
+  function processExistingCells() {
+    const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]:not([data-xbf-ok])');
+    for (const cell of cells) {
+      if (!cell.dataset.xbfTs) {
+        cell.dataset.xbfTs = String(Date.now());
+      }
+
+      const article = cell.querySelector(SELECTORS.tweet)
+        || cell.querySelector(SELECTORS.tweetFallback);
+
+      if (!article) {
+        markCellOkDirect(cell);
+        continue;
+      }
+
+      processTweet(article);
+    }
+  }
+
+  // ── Legacy processTweet (used by pending + rescan) ──
+  function processTweet(article) {
+    if (!settings.enabled) return;
+
+    const cell = article.closest(SELECTORS.cellInnerDiv);
+
+    // React DOM reuse detection
+    const currentKey = getTweetKey(article);
+    const previousKey = article.dataset.xbfTweetKey || '';
+
+    if (article.dataset.xbfProcessed === 'true') {
+      if (currentKey === previousKey) return;
+      resetArticle(article);
+      if (cell) cell.removeAttribute('data-xbf-ok');
+    }
+
+    article.dataset.xbfTweetKey = currentKey;
+
+    // Badge check
+    const badge = article.querySelector(SELECTORS.verifiedBadge)
+      || article.querySelector(SELECTORS.verifiedBadgeFallback);
+    if (!badge) {
+      article.dataset.xbfProcessed = 'true';
+      if (cell) markCellOkDirect(cell);
+      return;
+    }
+
+    badgeFoundCount++;
+
+    const handle = extractHandle(article);
+    if (!handle) {
+      pendingTweets.add(article);
+      return;
+    }
+
+    if (settings.whitelist.includes(handle)) {
+      article.dataset.xbfProcessed = 'true';
+      if (cell) markCellOkDirect(cell);
+      return;
+    }
+
+    const userData = userCache.get(handle);
+    let following = null;
+
+    if (userData) {
+      following = userData.following;
+    } else {
+      following = detectFollowFromDom(article, handle);
+      if (following === null && apiAvailable) {
+        pendingTweets.add(article);
+        return;
+      }
+      if (following === null) {
+        following = false;
+      }
+    }
+
+    if (following) {
+      followSkipCount++;
+      article.dataset.xbfProcessed = 'true';
+      if (cell) markCellOkDirect(cell);
+      return;
+    }
+
+    hideTweet(article, handle, cell);
     article.dataset.xbfProcessed = 'true';
   }
 
   function resetArticle(article) {
-    // Clear processing state for DOM-reused article
     article.dataset.xbfProcessed = '';
     article.dataset.xbfTweetKey = '';
     article.style.display = '';
 
-    // Clean up associated container
     const cell = article.closest(SELECTORS.cellInnerDiv) || article.parentElement;
     if (cell && cell.dataset?.xbfHidden === 'true') {
       cell.style.display = cell.dataset.xbfOriginalDisplay || '';
@@ -568,8 +736,8 @@
   //  Hide tweet - with container fallback
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  function hideTweet(article, handle) {
-    let cell = article.closest(SELECTORS.cellInnerDiv);
+  function hideTweet(article, handle, preFoundCell) {
+    let cell = preFoundCell || article.closest(SELECTORS.cellInnerDiv);
 
     // Fallback: walk up to find a reasonable container
     if (!cell) {
@@ -585,7 +753,6 @@
     }
 
     if (!cell || cell.dataset?.xbfHidden === 'true') {
-      // Last resort: hide article itself
       if (article.dataset.xbfHidden === 'true') return;
       article.dataset.xbfHidden = 'true';
       if (settings.showPlaceholder) {
@@ -596,6 +763,8 @@
         article.style.display = 'none';
       }
       hiddenCount++;
+      // Mark cell OK so pre-hide CSS doesn't interfere
+      markCellOk(article);
       updateFabCount();
       return;
     }
@@ -608,8 +777,13 @@
       const placeholder = createPlaceholder(handle, article, cell);
       article.style.display = 'none';
       cell.insertBefore(placeholder, article);
+      // Cell is visible (showing placeholder), mark OK to lift pre-hide
+      markCellOkDirect(cell);
     } else {
+      // Cell completely hidden
       cell.style.display = 'none';
+      // Still mark OK so pre-hide CSS doesn't conflict
+      markCellOkDirect(cell);
     }
 
     hiddenCount++;
@@ -659,7 +833,7 @@
   let panel = null;
 
   function setupUI() {
-    if (document.querySelector('.xbf-fab')) return; // Already created
+    if (document.querySelector('.xbf-fab')) return;
 
     fab = document.createElement('button');
     fab.className = 'xbf-fab';
@@ -680,7 +854,7 @@
     panel.className = 'xbf-settings-panel';
 
     const title = document.createElement('h3');
-    title.textContent = 'X Badge Filter v2.4';
+    title.textContent = 'X Badge Filter v2.5';
     panel.appendChild(title);
 
     const closeBtn = document.createElement('button');
@@ -692,8 +866,19 @@
     panel.appendChild(createToggle('enabled', 'フィルター ON/OFF', settings.enabled, (v) => {
       settings.enabled = v;
       Storage.set(settings);
-      if (v) { setupObserver(); processExistingTweets(); }
-      else { showAllHidden(); if (observer) observer.disconnect(); }
+      if (v) {
+        injectPreHideCSS();
+        setupObserver();
+        processExistingCells();
+      } else {
+        removePreHideCSS();
+        showAllHidden();
+        // Also reveal any pre-hidden cells
+        document.querySelectorAll('[data-testid="cellInnerDiv"]:not([data-xbf-ok])').forEach(c => {
+          markCellOkDirect(c);
+        });
+        if (observer) observer.disconnect();
+      }
     }));
 
     const dispSection = document.createElement('div');
@@ -783,6 +968,15 @@
     document.body.appendChild(panel);
   }
 
+  function injectPreHideCSS() {
+    if (document.getElementById('xbf-prehide')) return;
+    const s = document.createElement('style');
+    s.id = 'xbf-prehide';
+    s.textContent =
+      '[data-testid="cellInnerDiv"]:not([data-xbf-ok]) { visibility: hidden !important; }';
+    (document.head || document.documentElement).appendChild(s);
+  }
+
   function createToggle(id, label, checked, onChange) {
     const lbl = document.createElement('label');
     const cb = document.createElement('input');
@@ -822,6 +1016,9 @@
 
   function resetAndReprocess() {
     showAllHidden();
+    document.querySelectorAll('[data-xbf-ok]').forEach(el => {
+      el.removeAttribute('data-xbf-ok');
+    });
     document.querySelectorAll('[data-xbf-processed]').forEach(el => {
       el.dataset.xbfProcessed = '';
       el.dataset.xbfTweetKey = '';
@@ -829,7 +1026,7 @@
     pendingTweets.clear();
     badgeFoundCount = 0;
     followSkipCount = 0;
-    processExistingTweets();
+    processExistingCells();
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
