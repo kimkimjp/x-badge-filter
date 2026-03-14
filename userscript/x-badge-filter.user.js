@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      2.1.0
+// @version      2.2.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-start
-// @grant        unsafeWindow
+// @grant        none
 // ==/UserScript==
 
 (function () {
@@ -38,21 +38,18 @@
     whitelist: [],
   };
 
-  // Use the page's real window object (bypasses Tampermonkey sandbox)
-  const pageWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-
   function log(...args) {
     console.log(LOG_PREFIX, ...args);
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  Storage (localStorage-based, via page context)
+  //  Storage (localStorage-based)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const Storage = {
     get() {
       try {
-        const raw = pageWindow.localStorage.getItem(STORAGE_KEY);
+        const raw = localStorage.getItem(STORAGE_KEY);
         return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
       } catch {
         return { ...DEFAULT_SETTINGS };
@@ -60,7 +57,7 @@
     },
     set(settings) {
       try {
-        pageWindow.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
       } catch (e) {
         log('Storage.set error:', e);
       }
@@ -139,12 +136,13 @@
       }
       .xbf-fab {
         position: fixed; bottom: 80px; right: 20px; z-index: 99998;
-        width: 40px; height: 40px; border-radius: 50%;
+        width: 48px; height: 48px; border-radius: 50%;
         background: #1d9bf0; color: #fff; border: none;
         font-size: 18px; cursor: pointer; display: flex;
         align-items: center; justify-content: center;
         box-shadow: 0 2px 12px rgba(0,0,0,0.3);
         transition: opacity 0.2s;
+        -webkit-tap-highlight-color: transparent;
       }
       .xbf-fab:hover { opacity: 0.85; }
       .xbf-fab .xbf-fab-count {
@@ -154,34 +152,29 @@
         display: flex; align-items: center; justify-content: center;
         font-weight: 700; padding: 0 4px;
       }
-      .xbf-debug-banner {
-        position: fixed; top: 0; left: 0; right: 0; z-index: 100000;
-        background: rgba(29, 155, 240, 0.9); color: #fff;
-        padding: 4px 12px; font-size: 11px; font-family: monospace;
-        text-align: center; pointer-events: none;
-        transition: opacity 0.5s;
-      }
     `;
     document.head.appendChild(style);
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  API Interceptor via unsafeWindow
-  //  Patches the page's real fetch to intercept GraphQL responses
+  //  API Interceptor - fetch monkey-patch
+  //  With @grant none, window IS the page's window,
+  //  so patching window.fetch directly works.
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const userCache = new Map();
   let apiAvailable = false;
+  let fetchIntercepted = false;
 
   function setupFetchIntercept() {
     try {
-      const origFetch = pageWindow.fetch;
+      const origFetch = window.fetch;
       if (!origFetch) {
-        log('fetch not found on pageWindow');
+        log('WARNING: window.fetch not found');
         return;
       }
 
-      pageWindow.fetch = function (...args) {
+      window.fetch = function (...args) {
         const result = origFetch.apply(this, args);
 
         try {
@@ -194,13 +187,17 @@
             url.includes('TweetDetail') ||
             url.includes('ListLatestTweetsTimeline')
           )) {
+            if (!fetchIntercepted) {
+              fetchIntercepted = true;
+              log('First GraphQL fetch intercepted!');
+            }
             result.then(response => {
               try {
                 const clone = response.clone();
                 clone.json().then(data => {
                   const users = extractUsersFromApi(data);
                   if (users.length > 0) {
-                    log('API intercepted:', users.length, 'users from', url.split('/').pop()?.split('?')[0]);
+                    log('API:', users.length, 'users from', url.split('/').pop()?.split('?')[0]);
                     receiveApiUsers(users);
                   }
                 }).catch(() => {});
@@ -213,9 +210,9 @@
         return result;
       };
 
-      log('fetch interceptor installed on pageWindow');
+      log('fetch interceptor installed (page context, @grant none)');
     } catch (e) {
-      log('fetch intercept setup failed:', e);
+      log('fetch intercept failed:', e);
     }
   }
 
@@ -270,55 +267,6 @@
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  //  XHR Interceptor (backup for XMLHttpRequest-based requests)
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  function setupXhrIntercept() {
-    try {
-      const OrigXHR = pageWindow.XMLHttpRequest;
-      if (!OrigXHR) return;
-
-      pageWindow.XMLHttpRequest = function () {
-        const xhr = new OrigXHR();
-        const origOpen = xhr.open;
-        let capturedUrl = '';
-
-        xhr.open = function (method, url, ...rest) {
-          capturedUrl = url || '';
-          return origOpen.call(this, method, url, ...rest);
-        };
-
-        xhr.addEventListener('load', function () {
-          try {
-            if (capturedUrl.includes('/graphql/') && (
-              capturedUrl.includes('HomeTimeline') ||
-              capturedUrl.includes('HomeLatestTimeline') ||
-              capturedUrl.includes('SearchTimeline') ||
-              capturedUrl.includes('UserTweets') ||
-              capturedUrl.includes('TweetDetail') ||
-              capturedUrl.includes('ListLatestTweetsTimeline')
-            )) {
-              const data = JSON.parse(xhr.responseText);
-              const users = extractUsersFromApi(data);
-              if (users.length > 0) {
-                log('XHR intercepted:', users.length, 'users');
-                receiveApiUsers(users);
-              }
-            }
-          } catch (e) {}
-        });
-
-        return xhr;
-      };
-      pageWindow.XMLHttpRequest.prototype = OrigXHR.prototype;
-
-      log('XHR interceptor installed');
-    } catch (e) {
-      log('XHR intercept setup failed:', e);
-    }
-  }
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  DOM-based follow detection (fallback)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -345,36 +293,41 @@
   let observer = null;
   let processingScheduled = false;
   let pendingNodes = [];
+  let processedCount = 0;
+  let badgeFoundCount = 0;
 
   function initFilter() {
     settings = Storage.get();
-    log('Settings loaded:', JSON.stringify(settings));
+    log('Settings:', JSON.stringify(settings));
+    log('UA:', navigator.userAgent);
 
     if (!settings.enabled) {
-      log('Filter is disabled');
+      log('Filter disabled by settings');
       return;
     }
 
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        injectStyles();
-        setupUI();
-        setupObserver();
-        processExistingTweets();
-        showDebugBanner();
-      });
+      document.addEventListener('DOMContentLoaded', onDomReady);
     } else {
-      injectStyles();
-      setupUI();
-      setupObserver();
-      processExistingTweets();
-      showDebugBanner();
+      onDomReady();
     }
+  }
 
-    // Timeout: if API hasn't responded, use DOM fallback for pending tweets
+  function onDomReady() {
+    log('DOM ready, initializing UI and observer');
+    injectStyles();
+    setupUI();
+    setupObserver();
+    processExistingTweets();
+
+    // Periodic reprocessing for tweets that loaded before observer
     setTimeout(() => {
+      log('Status: API=' + apiAvailable + ' cache=' + userCache.size +
+          ' hidden=' + hiddenCount + ' processed=' + processedCount +
+          ' badges=' + badgeFoundCount + ' pending=' + pendingTweets.size);
+
       if (!apiAvailable && pendingTweets.size > 0) {
-        log('API timeout - processing', pendingTweets.size, 'pending tweets with DOM fallback');
+        log('API timeout, forcing DOM fallback for', pendingTweets.size, 'pending');
         const tweets = new Set(pendingTweets);
         pendingTweets.clear();
         for (const article of tweets) {
@@ -384,35 +337,17 @@
           }
         }
       }
-      if (!apiAvailable) {
-        log('API not available after timeout, reprocessing all tweets');
-        processExistingTweets();
-      }
+
+      // Reprocess all regardless
+      processExistingTweets();
     }, 5000);
-  }
 
-  function showDebugBanner() {
-    const banner = document.createElement('div');
-    banner.className = 'xbf-debug-banner';
-    banner.textContent = `XBF v2.1.0 | API: ${apiAvailable ? 'YES' : 'waiting...'} | Cache: ${userCache.size}`;
-    document.body.appendChild(banner);
-
-    // Update after API data arrives
-    const interval = setInterval(() => {
-      if (apiAvailable) {
-        banner.textContent = `XBF v2.1.0 | API: YES | Cache: ${userCache.size} | Hidden: ${hiddenCount}`;
-        setTimeout(() => { banner.style.opacity = '0'; }, 2000);
-        setTimeout(() => { banner.remove(); }, 2500);
-        clearInterval(interval);
-      }
-    }, 500);
-
-    // Auto-remove after 10s even without API
+    // Second pass at 10s
     setTimeout(() => {
-      banner.textContent = `XBF v2.1.0 | API: ${apiAvailable ? 'YES' : 'NO (DOM fallback)'} | Hidden: ${hiddenCount}`;
-      setTimeout(() => { banner.style.opacity = '0'; }, 2000);
-      setTimeout(() => { banner.remove(); }, 2500);
-      clearInterval(interval);
+      log('10s status: API=' + apiAvailable + ' cache=' + userCache.size +
+          ' hidden=' + hiddenCount + ' processed=' + processedCount +
+          ' badges=' + badgeFoundCount);
+      processExistingTweets();
     }, 10000);
   }
 
@@ -431,7 +366,7 @@
       || document.querySelector(SELECTORS.timelineFallback)
       || document.body;
 
-    log('Observer target:', target.tagName, target.dataset?.testid || '');
+    log('Observer on:', target.tagName + (target.dataset?.testid ? '[data-testid="' + target.dataset.testid + '"]' : ''));
 
     observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
@@ -462,13 +397,17 @@
 
   function processExistingTweets() {
     const tweets = document.querySelectorAll(SELECTORS.tweet);
-    log('Processing existing tweets:', tweets.length);
+    if (tweets.length > 0) {
+      log('Scanning', tweets.length, 'existing tweets');
+    }
     tweets.forEach(processTweet);
   }
 
   function processTweet(article) {
     if (!settings.enabled) return;
     if (article.dataset.xbfProcessed === 'true') return;
+
+    processedCount++;
 
     // Check for verified badge
     const badge = article.querySelector(SELECTORS.verifiedBadge)
@@ -477,6 +416,8 @@
       article.dataset.xbfProcessed = 'true';
       return;
     }
+
+    badgeFoundCount++;
 
     // Extract handle
     const handle = extractHandle(article);
@@ -500,12 +441,12 @@
     } else {
       following = detectFollowFromDom(article);
       if (following === null && apiAvailable) {
-        // API is available but we don't have data for this user yet - wait
+        // API available but no data for this user - wait a bit
         pendingTweets.add(article);
         return;
       }
       if (following === null) {
-        // No API, no DOM info → assume not following (will hide badge users)
+        // No API, no DOM clue → badge user, assume not following → hide
         following = false;
       }
     }
@@ -516,6 +457,7 @@
     }
 
     // Badge present + not following + not whitelisted → hide
+    log('HIDE: @' + handle + (userData ? ' (API:not following)' : ' (DOM fallback)'));
     hideTweet(article, handle);
     article.dataset.xbfProcessed = 'true';
   }
@@ -606,12 +548,13 @@
     fab.appendChild(fabCount);
     fab.addEventListener('click', togglePanel);
     document.body.appendChild(fab);
+    log('FAB button added to DOM');
 
     panel = document.createElement('div');
     panel.className = 'xbf-settings-panel';
 
     const title = document.createElement('h3');
-    title.textContent = 'X Badge Filter';
+    title.textContent = 'X Badge Filter v2.2';
     panel.appendChild(title);
 
     const closeBtn = document.createElement('button');
@@ -694,6 +637,24 @@
     wlSection.appendChild(wlList);
     panel.appendChild(wlSection);
 
+    // Debug info section
+    const debugSection = document.createElement('div');
+    debugSection.className = 'xbf-section';
+    const debugInfo = document.createElement('div');
+    debugInfo.style.cssText = 'font-size:10px;color:#536471;font-family:monospace;';
+    debugInfo.id = 'xbf-debug-info';
+    debugInfo.textContent = 'API: waiting... | Hidden: 0';
+    debugSection.appendChild(debugInfo);
+    panel.appendChild(debugSection);
+
+    // Update debug info periodically
+    setInterval(() => {
+      const el = document.getElementById('xbf-debug-info');
+      if (el) {
+        el.textContent = `API: ${apiAvailable ? 'YES' : 'NO'} | Cache: ${userCache.size} | Hidden: ${hiddenCount} | Badges: ${badgeFoundCount}`;
+      }
+    }, 2000);
+
     renderWhitelist();
     document.body.appendChild(panel);
   }
@@ -739,6 +700,8 @@
     showAllHidden();
     document.querySelectorAll('[data-xbf-processed]').forEach(el => { el.dataset.xbfProcessed = ''; });
     pendingTweets.clear();
+    processedCount = 0;
+    badgeFoundCount = 0;
     processExistingTweets();
   }
 
@@ -746,15 +709,12 @@
   //  Start
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  log('X Badge Filter v2.1.0 starting');
-  log('unsafeWindow available:', typeof unsafeWindow !== 'undefined');
-  log('pageWindow === window:', pageWindow === window);
+  log('v2.2.0 starting (@grant none = page context)');
 
-  // Install API interceptors on the PAGE's real window
+  // Install fetch interceptor (direct page context - no sandbox)
   setupFetchIntercept();
-  setupXhrIntercept();
 
-  // Initialize the content filter
+  // Initialize filter and UI
   initFilter();
 
 })();
