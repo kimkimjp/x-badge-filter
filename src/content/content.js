@@ -16,6 +16,7 @@
   let observer = null;
   let processingScheduled = false;
   let pendingNodes = [];
+  let apiAvailable = false; // Set true when first API data arrives via postMessage
 
   // ── Initialize ──
   async function init() {
@@ -27,6 +28,22 @@
     if (!settings.enabled) return;
     setupObserver();
     processExistingTweets();
+
+    // Timeout: if API interceptor hasn't sent data after 3s,
+    // it likely means "world": "MAIN" is not supported (Android browsers).
+    // Re-process pending tweets using DOM-based fallback.
+    setTimeout(() => {
+      if (!apiAvailable && pendingTweets.size > 0) {
+        const tweets = new Set(pendingTweets);
+        pendingTweets.clear();
+        for (const article of tweets) {
+          if (document.contains(article)) {
+            article.dataset.xbfProcessed = '';
+            processTweet(article);
+          }
+        }
+      }
+    }, 3000);
   }
 
   // ── Listen for API interceptor data via postMessage ──
@@ -37,6 +54,8 @@
       if (e.source !== window) return;
       if (!e.data || e.data.type !== MSG_TYPE) return;
       if (!Array.isArray(e.data.users)) return;
+
+      apiAvailable = true;
 
       for (const user of e.data.users) {
         // Validate user data structure
@@ -167,23 +186,40 @@
       return;
     }
 
-    // Check user cache (from API interceptor)
+    // Check user cache (from API interceptor) or fall back to DOM detection
     const userData = userCache.get(handle);
-    if (!userData) {
-      // API data not yet available, add to pending
-      pendingTweets.add(article);
-      return;
+    let following = null;
+    let badgeType = null;
+
+    if (userData) {
+      // Path 1: API data available (most accurate)
+      following = userData.following;
+      badgeType = userData.badgeType;
+    } else {
+      // Path 2: No API data → DOM-based fallback
+      // This handles Android browsers where "world": "MAIN" is not supported
+      following = detectFollowFromDom(article);
+      badgeType = detectBadgeTypeFromDom(badge);
+
+      if (following === null && apiAvailable) {
+        // API is working but this user's data hasn't arrived yet
+        pendingTweets.add(article);
+        return;
+      }
+      if (following === null) {
+        // Neither API nor DOM can determine follow state → treat as not following
+        following = false;
+      }
     }
 
     // If following, don't hide
-    if (userData.following) {
+    if (following) {
       article.dataset.xbfProcessed = 'true';
       return;
     }
 
     // Check badge type against filter settings
-    // P3 fix: detectBadgeTypeFromDom returns null if unknown (not 'blue')
-    const badgeType = userData.badgeType || detectBadgeTypeFromDom(badge);
+    badgeType = badgeType || detectBadgeTypeFromDom(badge);
     if (!badgeType) {
       article.dataset.xbfProcessed = 'true';
       return;
@@ -200,7 +236,7 @@
     }
 
     // Hide the tweet
-    hideTweet(article, handle, userData.name || handle);
+    hideTweet(article, handle, userData?.name || handle);
     article.dataset.xbfProcessed = 'true';
   }
 
@@ -220,6 +256,21 @@
       }
     }
     return null;
+  }
+
+  // ── Detect follow status from DOM (fallback for Android/unsupported browsers) ──
+  function detectFollowFromDom(article) {
+    const btns = article.querySelectorAll('[role="button"]');
+    for (const btn of btns) {
+      const text = (btn.textContent || '').trim();
+      // English
+      if (text === 'Follow') return false;
+      if (text === 'Following') return true;
+      // Japanese
+      if (text === 'フォロー' && text.length === 4) return false;
+      if (text === 'フォロー中') return true;
+    }
+    return null; // Cannot determine
   }
 
   // ── Detect badge type from DOM (fallback when API data lacks badge info) ──
