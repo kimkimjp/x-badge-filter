@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      2.3.0
+// @version      2.4.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
@@ -32,6 +32,7 @@
   const STORAGE_KEY = 'xbf_settings';
   const USER_CACHE_MAX = 5000;
   const LOG_PREFIX = '[XBF]';
+  const RESCAN_INTERVAL = 3000;
 
   const DEFAULT_SETTINGS = {
     enabled: true,
@@ -39,17 +40,7 @@
     whitelist: [],
   };
 
-  let debugLogCount = 0;
-  const DEBUG_LOG_LIMIT = 30;
-
   function log(...args) {
-    if (debugLogCount < DEBUG_LOG_LIMIT) {
-      debugLogCount++;
-      console.log(LOG_PREFIX, ...args);
-    }
-  }
-
-  function logAlways(...args) {
     console.log(LOG_PREFIX, ...args);
   }
 
@@ -87,7 +78,9 @@
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function injectStyles() {
+    if (document.getElementById('xbf-styles')) return;
     const style = document.createElement('style');
+    style.id = 'xbf-styles';
     style.textContent = `
       .xbf-placeholder {
         display: flex; align-items: center; gap: 8px;
@@ -162,13 +155,12 @@
         font-weight: 700; padding: 0 4px;
       }
     `;
-    document.head.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  API Interceptor - fetch monkey-patch
-  //  Note: May not work on Firefox Android due to Tampermonkey
-  //  sandbox issues. DOM-based filtering is the primary approach.
+  //  Note: May not work on Firefox Android. DOM filtering is primary.
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const userCache = new Map();
@@ -196,10 +188,7 @@
                 const clone = response.clone();
                 clone.json().then(data => {
                   const users = extractUsersFromApi(data);
-                  if (users.length > 0) {
-                    log('API:', users.length, 'users');
-                    receiveApiUsers(users);
-                  }
+                  if (users.length > 0) receiveApiUsers(users);
                 }).catch(() => {});
               } catch (e) {}
               return response;
@@ -208,10 +197,7 @@
         } catch (e) {}
         return result;
       };
-      log('fetch interceptor installed');
-    } catch (e) {
-      log('fetch intercept failed:', e);
-    }
+    } catch (e) {}
   }
 
   function receiveApiUsers(users) {
@@ -269,80 +255,48 @@
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function extractHandle(article) {
-    let handle = null;
-    let method = '';
+    // Strategy 1: data-testid="User-Name"
+    let handle = extractHandleFromUserName(article, SELECTORS.userName);
+    if (handle) return handle;
 
-    // Strategy 1: data-testid="User-Name" (desktop primary)
-    handle = extractHandleFromUserName(article, SELECTORS.userName);
-    if (handle) { method = 'User-Name'; }
+    // Strategy 2: data-testid="User-Names"
+    handle = extractHandleFromUserName(article, SELECTORS.userNameAlt);
+    if (handle) return handle;
 
-    // Strategy 2: data-testid="User-Names" (possible alternate)
-    if (!handle) {
-      handle = extractHandleFromUserName(article, SELECTORS.userNameAlt);
-      if (handle) { method = 'User-Names'; }
-    }
+    // Strategy 3: Profile links
+    handle = extractHandleFromLinks(article);
+    if (handle) return handle;
 
-    // Strategy 3: Find profile links in article (any a[href="/username"])
-    if (!handle) {
-      handle = extractHandleFromLinks(article);
-      if (handle) { method = 'links'; }
-    }
-
-    // Strategy 4: Find @username text in spans
-    if (!handle) {
-      handle = extractHandleFromText(article);
-      if (handle) { method = 'text'; }
-    }
-
-    if (handle && badgeFoundCount <= 5) {
-      log('Handle: @' + handle + ' via ' + method);
-    }
-
+    // Strategy 4: @username text
+    handle = extractHandleFromText(article);
     return handle;
   }
 
   function extractHandleFromUserName(article, selector) {
     const area = article.querySelector(selector);
     if (!area) return null;
-
-    // Try a[role="link"] first
-    const roleLinks = area.querySelectorAll('a[role="link"]');
-    for (const link of roleLinks) {
+    const links = area.querySelectorAll('a[href]');
+    for (const link of links) {
       const h = handleFromHref(link);
       if (h) return h;
     }
-
-    // Fallback: any <a> with href
-    const allLinks = area.querySelectorAll('a[href]');
-    for (const link of allLinks) {
-      const h = handleFromHref(link);
-      if (h) return h;
-    }
-
     return null;
   }
 
   function extractHandleFromLinks(article) {
-    // Look for profile links: the first /username link in the tweet
-    // Exclude known non-profile paths
     const excludePaths = ['/status/', '/hashtag/', '/search', '/i/', '/compose', '/settings', '/home', '/explore', '/notifications', '/messages'];
     const links = article.querySelectorAll('a[href^="/"]');
     for (const link of links) {
       const href = link.getAttribute('href');
       if (!href || href === '/') continue;
       if (excludePaths.some(p => href.includes(p))) continue;
-
-      // Match /username pattern (1-15 chars, alphanumeric + underscore)
       const match = href.match(/^\/([A-Za-z0-9_]{1,15})$/);
-      if (match) {
-        return match[1].toLowerCase();
-      }
+      if (match) return match[1].toLowerCase();
     }
     return null;
   }
 
   function extractHandleFromText(article) {
-    // Find @handle text patterns in the first few spans
     const spans = article.querySelectorAll('span');
     for (const span of spans) {
       const text = (span.textContent || '').trim();
@@ -363,18 +317,63 @@
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  DOM-based follow detection
+  //  IMPORTANT: Only check buttons near the tweet AUTHOR,
+  //  not in the entire article (which may contain RT/quote buttons)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  function detectFollowFromDom(article) {
-    const btns = article.querySelectorAll('[role="button"]');
+  function detectFollowFromDom(article, handle) {
+    // Strategy 1: Find follow button near User-Name area
+    const userNameArea = article.querySelector(SELECTORS.userName)
+      || article.querySelector(SELECTORS.userNameAlt);
+
+    if (userNameArea) {
+      // Walk up from User-Name to find the header row containing the follow button
+      let headerRow = userNameArea.parentElement;
+      for (let i = 0; i < 3 && headerRow && headerRow !== article; i++) {
+        const result = checkFollowButtons(headerRow);
+        if (result !== null) return result;
+        headerRow = headerRow.parentElement;
+      }
+    }
+
+    // Strategy 2: Find follow button near the author's profile link
+    if (handle) {
+      const profileLinks = article.querySelectorAll(`a[href="/${handle}" i], a[href="/${handle}"]`);
+      for (const link of profileLinks) {
+        let ancestor = link.parentElement;
+        for (let i = 0; i < 4 && ancestor && ancestor !== article; i++) {
+          const result = checkFollowButtons(ancestor);
+          if (result !== null) return result;
+          ancestor = ancestor.parentElement;
+        }
+      }
+    }
+
+    // DO NOT search entire article — that would match RT/quote follow buttons
+    return null;
+  }
+
+  function checkFollowButtons(container) {
+    const btns = container.querySelectorAll('[role="button"]');
     for (const btn of btns) {
       const text = (btn.textContent || '').trim();
-      if (text === 'Follow') return false;
-      if (text === 'Following') return true;
-      if (text === 'フォロー' && text.length === 4) return false;
-      if (text === 'フォロー中') return true;
+      // Only match exact follow/following button text
+      if (text === 'Follow' || (text === 'フォロー' && text.length === 4)) return false;
+      if (text === 'Following' || text === 'フォロー中') return true;
     }
     return null;
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Tweet identity tracking (for React DOM reuse detection)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function getTweetKey(article) {
+    // Use permalink (/user/status/id) as unique tweet identifier
+    const statusLink = article.querySelector('a[href*="/status/"]');
+    if (statusLink) return statusLink.getAttribute('href');
+    // Fallback: first 80 chars of text content
+    return (article.textContent || '').slice(0, 80);
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -388,20 +387,15 @@
   let observer = null;
   let processingScheduled = false;
   let pendingNodes = [];
-  let processedCount = 0;
   let badgeFoundCount = 0;
-  let handleFailCount = 0;
-  let hideFailCount = 0;
+  let followSkipCount = 0;
+  let lastUrl = '';
 
   function initFilter() {
     settings = Storage.get();
-    log('Settings:', JSON.stringify(settings));
-    log('UA:', navigator.userAgent);
+    log('v2.4.0 | enabled=' + settings.enabled);
 
-    if (!settings.enabled) {
-      log('Filter disabled');
-      return;
-    }
+    if (!settings.enabled) return;
 
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', onDomReady);
@@ -416,44 +410,22 @@
     setupUI();
     setupObserver();
     processExistingTweets();
+    lastUrl = location.href;
 
-    // 5s: force process pending tweets without API
-    setTimeout(() => {
-      logAlways('5s: API=' + apiAvailable + ' cache=' + userCache.size +
-          ' hidden=' + hiddenCount + ' badges=' + badgeFoundCount +
-          ' pending=' + pendingTweets.size + ' handleFail=' + handleFailCount +
-          ' hideFail=' + hideFailCount);
+    // Periodic re-scan: catches SPA navigations, DOM reuse, new tweets
+    setInterval(() => {
+      if (!settings.enabled) return;
 
-      if (pendingTweets.size > 0) {
-        logAlways('Forcing ' + pendingTweets.size + ' pending tweets');
-        const tweets = new Set(pendingTweets);
-        pendingTweets.clear();
-        for (const article of tweets) {
-          if (document.contains(article)) {
-            article.dataset.xbfProcessed = '';
-            processTweet(article);
-          }
-        }
+      // Detect SPA navigation (URL changed without page reload)
+      if (location.href !== lastUrl) {
+        log('SPA navigation: ' + lastUrl + ' → ' + location.href);
+        lastUrl = location.href;
+        // Re-setup observer in case timeline element was replaced
+        setupObserver();
       }
-      processExistingTweets();
-    }, 5000);
 
-    // 12s: second pass
-    setTimeout(() => {
-      logAlways('12s: hidden=' + hiddenCount + ' badges=' + badgeFoundCount +
-          ' pending=' + pendingTweets.size + ' handleFail=' + handleFailCount);
-      if (pendingTweets.size > 0) {
-        const tweets = new Set(pendingTweets);
-        pendingTweets.clear();
-        for (const article of tweets) {
-          if (document.contains(article)) {
-            article.dataset.xbfProcessed = '';
-            processTweet(article);
-          }
-        }
-      }
       processExistingTweets();
-    }, 12000);
+    }, RESCAN_INTERVAL);
   }
 
   function processPendingTweets() {
@@ -467,12 +439,9 @@
 
   function setupObserver() {
     if (observer) observer.disconnect();
-    const target = document.querySelector(SELECTORS.timeline)
-      || document.querySelector(SELECTORS.timelineFallback)
-      || document.body;
 
-    log('Observer:', target.tagName);
-
+    // Always observe document.body for SPA safety
+    // (timeline elements can be destroyed/recreated during navigation)
     observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
@@ -482,7 +451,7 @@
       if (pendingNodes.length > 500) pendingNodes = pendingNodes.slice(-200);
       scheduleProcessing();
     });
-    observer.observe(target, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   function scheduleProcessing() {
@@ -491,11 +460,9 @@
     requestAnimationFrame(() => {
       const nodes = pendingNodes.splice(0);
       for (const node of nodes) {
-        // Try primary selector
         let tweets = node.matches?.(SELECTORS.tweet)
           ? [node]
           : Array.from(node.querySelectorAll?.(SELECTORS.tweet) || []);
-        // Try fallback selector if nothing found
         if (tweets.length === 0 && node.querySelectorAll) {
           tweets = Array.from(node.querySelectorAll(SELECTORS.tweetFallback) || []);
         }
@@ -509,16 +476,24 @@
     let tweets = document.querySelectorAll(SELECTORS.tweet);
     if (tweets.length === 0) {
       tweets = document.querySelectorAll(SELECTORS.tweetFallback);
-      if (tweets.length > 0) log('Using fallback tweet selector, found:', tweets.length);
     }
     tweets.forEach(processTweet);
   }
 
   function processTweet(article) {
     if (!settings.enabled) return;
-    if (article.dataset.xbfProcessed === 'true') return;
 
-    processedCount++;
+    // Detect React DOM reuse: same DOM element, different tweet content
+    const currentKey = getTweetKey(article);
+    const previousKey = article.dataset.xbfTweetKey || '';
+
+    if (article.dataset.xbfProcessed === 'true') {
+      if (currentKey === previousKey) return; // Same tweet, already processed
+      // Different tweet in same DOM element → reset and re-process
+      resetArticle(article);
+    }
+
+    article.dataset.xbfTweetKey = currentKey;
 
     // Check for verified badge
     const badge = article.querySelector(SELECTORS.verifiedBadge)
@@ -530,26 +505,9 @@
 
     badgeFoundCount++;
 
-    // Extract handle (with multiple fallback strategies)
+    // Extract handle
     const handle = extractHandle(article);
     if (!handle) {
-      handleFailCount++;
-      if (handleFailCount <= 3) {
-        // Log diagnostic info for first few failures
-        const hasUN = !!article.querySelector(SELECTORS.userName);
-        const hasUNs = !!article.querySelector(SELECTORS.userNameAlt);
-        const linkCount = article.querySelectorAll('a[href^="/"]').length;
-        const atSpans = Array.from(article.querySelectorAll('span'))
-          .filter(s => (s.textContent || '').startsWith('@')).length;
-        logAlways('HANDLE FAIL #' + handleFailCount +
-          ': User-Name=' + hasUN + ' User-Names=' + hasUNs +
-          ' links=' + linkCount + ' @spans=' + atSpans);
-        // Log first few href values for debugging
-        const hrefs = Array.from(article.querySelectorAll('a[href^="/"]'))
-          .slice(0, 5)
-          .map(a => a.getAttribute('href'));
-        logAlways('  hrefs:', hrefs.join(', '));
-      }
       pendingTweets.add(article);
       return;
     }
@@ -567,31 +525,43 @@
     if (userData) {
       following = userData.following;
     } else {
-      following = detectFollowFromDom(article);
+      // Only check buttons near the tweet AUTHOR, not the entire article
+      following = detectFollowFromDom(article, handle);
       if (following === null && apiAvailable) {
         pendingTweets.add(article);
         return;
       }
       if (following === null) {
-        // No API, no DOM clue → badge present, assume not following → hide
+        // No API, no author-specific follow button → assume not following
         following = false;
       }
     }
 
     if (following) {
+      followSkipCount++;
       article.dataset.xbfProcessed = 'true';
       return;
     }
 
     // Badge + not following + not whitelisted → hide
-    const success = hideTweet(article, handle);
-    if (!success) {
-      hideFailCount++;
-      if (hideFailCount <= 3) {
-        logAlways('HIDE FAIL for @' + handle + ': no container found');
-      }
-    }
+    hideTweet(article, handle);
     article.dataset.xbfProcessed = 'true';
+  }
+
+  function resetArticle(article) {
+    // Clear processing state for DOM-reused article
+    article.dataset.xbfProcessed = '';
+    article.dataset.xbfTweetKey = '';
+    article.style.display = '';
+
+    // Clean up associated container
+    const cell = article.closest(SELECTORS.cellInnerDiv) || article.parentElement;
+    if (cell && cell.dataset?.xbfHidden === 'true') {
+      cell.style.display = cell.dataset.xbfOriginalDisplay || '';
+      cell.dataset.xbfHidden = '';
+      const placeholder = cell.querySelector('.xbf-placeholder');
+      if (placeholder) placeholder.remove();
+    }
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -599,33 +569,25 @@
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   function hideTweet(article, handle) {
-    // Find the container cell
     let cell = article.closest(SELECTORS.cellInnerDiv);
 
     // Fallback: walk up to find a reasonable container
     if (!cell) {
       cell = article.parentElement;
-      // Walk up to find a div that's a direct timeline item
-      // (usually 2-3 levels above the article)
       let walk = 0;
       while (cell && walk < 5) {
-        if (cell.style && cell.style.display !== undefined) break;
-        // If we find something that looks like a list item container, use it
-        if (cell.getAttribute && (
-          cell.getAttribute('data-testid') ||
-          cell.tagName === 'DIV' && cell.parentElement &&
-          cell.parentElement.childElementCount > 1
-        )) break;
+        if (cell.getAttribute?.('data-testid')) break;
+        if (cell.tagName === 'DIV' && cell.parentElement &&
+            cell.parentElement.childElementCount > 1) break;
         cell = cell.parentElement;
         walk++;
       }
     }
 
     if (!cell || cell.dataset?.xbfHidden === 'true') {
-      // Last resort: hide the article itself
-      if (article.dataset.xbfHidden === 'true') return false;
+      // Last resort: hide article itself
+      if (article.dataset.xbfHidden === 'true') return;
       article.dataset.xbfHidden = 'true';
-
       if (settings.showPlaceholder) {
         const placeholder = createPlaceholder(handle, article, article);
         article.style.display = 'none';
@@ -635,7 +597,7 @@
       }
       hiddenCount++;
       updateFabCount();
-      return true;
+      return;
     }
 
     cell.dataset.xbfHidden = 'true';
@@ -652,7 +614,6 @@
 
     hiddenCount++;
     updateFabCount();
-    return true;
   }
 
   function createPlaceholder(handle, article, container) {
@@ -698,6 +659,8 @@
   let panel = null;
 
   function setupUI() {
+    if (document.querySelector('.xbf-fab')) return; // Already created
+
     fab = document.createElement('button');
     fab.className = 'xbf-fab';
     fab.title = 'X Badge Filter';
@@ -717,7 +680,7 @@
     panel.className = 'xbf-settings-panel';
 
     const title = document.createElement('h3');
-    title.textContent = 'X Badge Filter v2.3';
+    title.textContent = 'X Badge Filter v2.4';
     panel.appendChild(title);
 
     const closeBtn = document.createElement('button');
@@ -801,7 +764,7 @@
     const debugSection = document.createElement('div');
     debugSection.className = 'xbf-section';
     const debugInfo = document.createElement('div');
-    debugInfo.style.cssText = 'font-size:10px;color:#536471;font-family:monospace;line-height:1.6;';
+    debugInfo.style.cssText = 'font-size:10px;color:#536471;font-family:monospace;line-height:1.6;white-space:pre;';
     debugInfo.id = 'xbf-debug-info';
     debugSection.appendChild(debugInfo);
     panel.appendChild(debugSection);
@@ -812,8 +775,7 @@
         el.textContent =
           `API:${apiAvailable ? 'YES' : 'NO'} Cache:${userCache.size}\n` +
           `Hidden:${hiddenCount} Badges:${badgeFoundCount}\n` +
-          `Pending:${pendingTweets.size} HandleFail:${handleFailCount}\n` +
-          `HideFail:${hideFailCount}`;
+          `FollowSkip:${followSkipCount} Pend:${pendingTweets.size}`;
       }
     }, 2000);
 
@@ -860,20 +822,19 @@
 
   function resetAndReprocess() {
     showAllHidden();
-    document.querySelectorAll('[data-xbf-processed]').forEach(el => { el.dataset.xbfProcessed = ''; });
+    document.querySelectorAll('[data-xbf-processed]').forEach(el => {
+      el.dataset.xbfProcessed = '';
+      el.dataset.xbfTweetKey = '';
+    });
     pendingTweets.clear();
-    processedCount = 0;
     badgeFoundCount = 0;
-    handleFailCount = 0;
-    hideFailCount = 0;
+    followSkipCount = 0;
     processExistingTweets();
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Start
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  log('v2.3.0 starting');
 
   setupFetchIntercept();
   initFilter();
