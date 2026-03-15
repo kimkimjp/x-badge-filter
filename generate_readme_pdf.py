@@ -277,7 +277,7 @@ def create_flow_diagram(width=460, height=100):
 
 
 def build_pdf():
-    output_path = '/home/kimkimjp/x-badge-filter/X_Badge_Filter_Guide.pdf'
+    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'X_Badge_Filter_Guide.pdf')
     doc = SimpleDocTemplate(
         output_path, pagesize=A4,
         leftMargin=20*mm, rightMargin=20*mm,
