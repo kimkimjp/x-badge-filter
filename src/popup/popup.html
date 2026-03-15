@@ -15,22 +15,46 @@
     </header>
 
     <section class="section" id="settingsSection">
-      <h2>表示設定</h2>
+      <h2 data-i18n="displaySettings">表示設定</h2>
       <div class="option-list">
         <label class="option">
-          <span class="option-label">非表示バーを表示</span>
+          <span class="option-label" data-i18n="showPlaceholderBar">非表示バーを表示</span>
           <input type="checkbox" id="showPlaceholder">
         </label>
       </div>
 
-      <h2>ホワイトリスト</h2>
+      <h2 data-i18n="filterSettings">フィルタ設定</h2>
+      <div class="option-list">
+        <label class="option">
+          <span class="badge-dot blue"></span>
+          <span class="option-label" data-i18n="filterBlue">青バッジ（個人課金）</span>
+          <input type="checkbox" id="filterBlue">
+        </label>
+        <label class="option">
+          <span class="badge-dot gold"></span>
+          <span class="option-label" data-i18n="filterGold">金バッジ（企業公式）</span>
+          <input type="checkbox" id="filterGold">
+        </label>
+        <label class="option">
+          <span class="badge-dot grey"></span>
+          <span class="option-label" data-i18n="filterGrey">灰バッジ（政府機関）</span>
+          <input type="checkbox" id="filterGrey">
+        </label>
+      </div>
+
+      <h2 data-i18n="whitelist">ホワイトリスト</h2>
       <div class="whitelist-section">
         <div class="whitelist-input-row">
           <input type="text" id="whitelistInput" placeholder="@handle" spellcheck="false">
-          <button id="addWhitelist">追加</button>
+          <button id="addWhitelist" data-i18n="add">追加</button>
         </div>
         <div id="whitelistItems" class="whitelist-items"></div>
-        <p class="whitelist-empty" id="whitelistEmpty">ホワイトリストは空です</p>
+        <p class="whitelist-empty" id="whitelistEmpty" data-i18n="whitelistEmpty">ホワイトリストは空です</p>
+        <div class="whitelist-actions">
+          <button id="exportWhitelist" class="action-btn" data-i18n="exportBtn">エクスポート</button>
+          <button id="importWhitelist" class="action-btn" data-i18n="importBtn">インポート</button>
+          <input type="file" id="importFileInput" accept=".json" style="display:none">
+        </div>
       </div>
     </section>
 

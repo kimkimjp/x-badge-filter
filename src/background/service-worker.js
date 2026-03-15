@@ -1,6 +1,8 @@
 // X Badge Filter - Background Service Worker
 // Manages badge count display and settings initialization
 
+let sessionHiddenCount = 0;
+
 chrome.runtime.onInstalled.addListener(async () => {
   // Set default settings if not already set
   const data = await chrome.storage.local.get('xbf_settings');
@@ -8,22 +10,28 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({
       xbf_settings: {
         enabled: true,
+        showPlaceholder: true,
         filterBlue: true,
         filterGold: false,
         filterGrey: false,
-        showPlaceholder: true,
         whitelist: [],
       }
     });
   }
 });
 
-// Handle badge count updates from content script
-chrome.runtime.onMessage.addListener((message, sender) => {
+// Handle messages from content script and popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'updateBadge' && sender.tab) {
     const count = message.count || 0;
-    const text = count > 0 ? String(count > 999 ? '999+' : count) : '';
+    sessionHiddenCount += count;
+    const text = sessionHiddenCount > 0 ? String(sessionHiddenCount > 999 ? '999+' : sessionHiddenCount) : '';
     chrome.action.setBadgeText({ text, tabId: sender.tab.id });
     chrome.action.setBadgeBackgroundColor({ color: '#1d9bf0', tabId: sender.tab.id });
+  }
+
+  if (message.type === 'getSessionCount') {
+    sendResponse({ count: sessionHiddenCount });
+    return true;
   }
 });

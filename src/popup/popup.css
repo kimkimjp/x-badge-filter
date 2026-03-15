@@ -236,6 +236,31 @@ body {
   text-align: center;
 }
 
+/* Whitelist actions (export/import) */
+.whitelist-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.action-btn {
+  flex: 1;
+  padding: 6px 10px;
+  background: #1e2732;
+  color: #8b98a5;
+  border: 1px solid #38444d;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+
+.action-btn:hover {
+  background: #263340;
+  color: #e7e9ea;
+}
+
 /* Footer */
 .footer {
   margin-top: 16px;

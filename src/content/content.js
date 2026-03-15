@@ -2,7 +2,7 @@
 // Runs in ISOLATED world, listens for API data via postMessage,
 // observes DOM, filters tweets
 //
-// Logic: badge present + not following + not whitelisted → hide
+// Logic: badge present + not following + not whitelisted + badge type enabled → hide
 
 (function () {
   'use strict';
@@ -12,7 +12,7 @@
 
   // ── State ──
   let settings = { ...XBF_DEFAULT_SETTINGS };
-  let userCache = new Map(); // handle → { following, name }
+  let userCache = new Map(); // handle → { following, name, isBlueVerified, verifiedType }
   let pendingTweets = new Set();
   let hiddenCount = 0;
   let observer = null;
@@ -62,6 +62,8 @@
         userCache.set(user.handle, {
           following: user.following === true,
           name: typeof user.name === 'string' ? user.name : '',
+          isBlueVerified: user.isBlueVerified === true,
+          verifiedType: user.verifiedType || null,
         });
       }
 
@@ -141,11 +143,36 @@
     tweets.forEach(processTweet);
   }
 
+  // ── Determine badge type from user data ──
+  // Returns 'gold', 'grey', 'blue', or null (no badge)
+  function getBadgeType(userData) {
+    if (!userData) return 'blue'; // default when API info unavailable
+    if (userData.verifiedType === 'Business') return 'gold';
+    if (userData.verifiedType === 'Government') return 'grey';
+    if (userData.isBlueVerified) return 'blue';
+    return 'blue'; // badge exists but type unknown → default blue
+  }
+
+  // ── Check if badge type should be filtered based on settings ──
+  function shouldFilterBadgeType(badgeType) {
+    if (badgeType === 'blue') return settings.filterBlue !== false;
+    if (badgeType === 'gold') return settings.filterGold === true;
+    if (badgeType === 'grey') return settings.filterGrey === true;
+    return true;
+  }
+
   // ── Core: Process a single tweet ──
-  // Simple logic: badge present + not following + not whitelisted → hide
+  // Logic: badge present + not following + not whitelisted + badge type enabled → hide
   function processTweet(article) {
     if (!settings.enabled) return;
     if (article.dataset.xbfProcessed === 'true') return;
+
+    // Skip inner (quoted) tweets — only process outermost article
+    if (article.parentElement && article.parentElement.closest('article[data-testid="tweet"]')) {
+      // This article is nested inside another article (quote tweet)
+      article.dataset.xbfProcessed = 'true';
+      return;
+    }
 
     // Find the verified badge
     const badge = article.querySelector(XBF_SELECTORS.verifiedBadge)
@@ -188,6 +215,41 @@
     }
 
     if (following) {
+      article.dataset.xbfProcessed = 'true';
+      return;
+    }
+
+    // ── Retweet check: if RT'd by a followed user, don't filter ──
+    const socialContext = article.querySelector(XBF_SELECTORS.socialContext);
+    if (socialContext) {
+      const contextText = socialContext.textContent || '';
+      if (contextText.includes('reposted') || contextText.includes('リポスト')) {
+        // Try to extract the RT author's handle from socialContext link
+        const rtLink = socialContext.querySelector('a[role="link"]');
+        if (rtLink) {
+          const rtHref = rtLink.getAttribute('href');
+          if (rtHref && rtHref.startsWith('/')) {
+            const rtHandle = rtHref.slice(1).toLowerCase().split('/')[0];
+            if (rtHandle) {
+              const rtUser = userCache.get(rtHandle);
+              if (rtUser && rtUser.following) {
+                article.dataset.xbfProcessed = 'true';
+                return;
+              }
+              // Also check whitelist for the RT author
+              if (settings.whitelist.includes(rtHandle)) {
+                article.dataset.xbfProcessed = 'true';
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // ── Badge type filter check ──
+    const badgeType = getBadgeType(userData);
+    if (!shouldFilterBadgeType(badgeType)) {
       article.dataset.xbfProcessed = 'true';
       return;
     }
@@ -245,18 +307,18 @@
 
       const text = document.createElement('span');
       text.className = 'xbf-placeholder-text';
-      text.textContent = `@${handle} の投稿を非表示にしました`;
+      text.textContent = `@${handle} ${xbfT('hiddenPost')}`;
 
       const showBtn = document.createElement('button');
       showBtn.className = 'xbf-show-btn';
-      showBtn.textContent = '表示';
+      showBtn.textContent = xbfT('show');
       showBtn.addEventListener('click', () => {
         restoreCell(cell, article, placeholder);
       });
 
       const whitelistBtn = document.createElement('button');
       whitelistBtn.className = 'xbf-whitelist-btn';
-      whitelistBtn.textContent = '常に表示';
+      whitelistBtn.textContent = xbfT('alwaysShow');
       whitelistBtn.addEventListener('click', () => {
         XBF_Storage.addToWhitelist(handle);
         settings.whitelist.push(handle);
@@ -292,7 +354,7 @@
     try {
       chrome.runtime.sendMessage({
         type: 'updateBadge',
-        count: hiddenCount,
+        count: 1, // send increment of 1 per hidden tweet
       });
     } catch (e) {}
   }
@@ -333,7 +395,6 @@
       cell.dataset.xbfHidden = '';
     });
     hiddenCount = 0;
-    updateBadgeCount();
   }
 
   function resetAndReprocess() {
