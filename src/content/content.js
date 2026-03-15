@@ -237,6 +237,7 @@
     cell.dataset.xbfHidden = 'true';
     cell.dataset.xbfHandle = handle;
     cell.dataset.xbfOriginalDisplay = cell.style.display || '';
+    cell.dataset.xbfOriginalHeight = cell.style.height || '';
 
     if (settings.showPlaceholder) {
       const placeholder = document.createElement('div');
@@ -250,10 +251,7 @@
       showBtn.className = 'xbf-show-btn';
       showBtn.textContent = '表示';
       showBtn.addEventListener('click', () => {
-        cell.style.display = cell.dataset.xbfOriginalDisplay;
-        article.style.display = '';
-        placeholder.remove();
-        cell.dataset.xbfHidden = 'false';
+        restoreCell(cell, article, placeholder);
       });
 
       const whitelistBtn = document.createElement('button');
@@ -262,10 +260,7 @@
       whitelistBtn.addEventListener('click', () => {
         XBF_Storage.addToWhitelist(handle);
         settings.whitelist.push(handle);
-        cell.style.display = cell.dataset.xbfOriginalDisplay;
-        article.style.display = '';
-        placeholder.remove();
-        cell.dataset.xbfHidden = 'false';
+        restoreCell(cell, article, placeholder);
       });
 
       placeholder.appendChild(text);
@@ -275,11 +270,21 @@
       article.style.display = 'none';
       cell.insertBefore(placeholder, article);
     } else {
-      cell.style.display = 'none';
+      // Complete hiding: collapse the cell entirely
+      cell.classList.add('xbf-hidden-cell');
     }
 
     hiddenCount++;
     updateBadgeCount();
+  }
+
+  function restoreCell(cell, article, placeholder) {
+    cell.classList.remove('xbf-hidden-cell');
+    cell.style.display = cell.dataset.xbfOriginalDisplay || '';
+    cell.style.height = cell.dataset.xbfOriginalHeight || '';
+    if (article) article.style.display = '';
+    if (placeholder) placeholder.remove();
+    cell.dataset.xbfHidden = 'false';
   }
 
   // ── Badge count ──
@@ -315,7 +320,9 @@
 
   function showAllHidden() {
     document.querySelectorAll('[data-xbf-hidden="true"]').forEach(cell => {
+      cell.classList.remove('xbf-hidden-cell');
       cell.style.display = cell.dataset.xbfOriginalDisplay || '';
+      cell.style.height = cell.dataset.xbfOriginalHeight || '';
       const article = cell.querySelector(XBF_SELECTORS.tweet);
       if (article) {
         article.style.display = '';

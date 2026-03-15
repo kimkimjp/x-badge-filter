@@ -1,5 +1,16 @@
 /* X Badge Filter - Content Script Styles */
 
+/* Complete hiding: no placeholder, no gap, no trace */
+.xbf-hidden-cell {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  overflow: hidden !important;
+}
+
 .xbf-placeholder {
   display: flex;
   align-items: center;
