@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      2.5.0
+// @version      2.6.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
@@ -26,6 +26,46 @@
   (document.head || document.documentElement).appendChild(preHideStyle);
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  i18n
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const XBF_I18N = {
+    ja: {
+      hiddenPost: 'の投稿を非表示にしました',
+      show: '表示',
+      alwaysShow: '常に表示',
+      filterOn: 'フィルター ON/OFF',
+      showPlaceholder: '非表示バーを表示',
+      filterBlue: '青バッジ（個人課金）',
+      filterGold: '金バッジ（企業公式）',
+      filterGrey: '灰バッジ（政府機関）',
+      whitelist: 'ホワイトリスト',
+      add: '追加',
+      exportBtn: 'エクスポート',
+      importBtn: 'インポート',
+    },
+    en: {
+      hiddenPost: "'s post was hidden",
+      show: 'Show',
+      alwaysShow: 'Always Show',
+      filterOn: 'Filter ON/OFF',
+      showPlaceholder: 'Show hidden bar',
+      filterBlue: 'Blue (Premium)',
+      filterGold: 'Gold (Business)',
+      filterGrey: 'Grey (Government)',
+      whitelist: 'Whitelist',
+      add: 'Add',
+      exportBtn: 'Export',
+      importBtn: 'Import',
+    },
+  };
+
+  function t(key) {
+    const lang = (navigator.language || '').startsWith('ja') ? 'ja' : 'en';
+    return (XBF_I18N[lang] || XBF_I18N.en)[key] || key;
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Constants
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -39,6 +79,7 @@
     cellInnerDiv: '[data-testid="cellInnerDiv"]',
     userName: '[data-testid="User-Name"]',
     userNameAlt: '[data-testid="User-Names"]',
+    socialContext: '[data-testid="socialContext"]',
   };
 
   const STORAGE_KEY = 'xbf_settings';
@@ -50,6 +91,9 @@
   const DEFAULT_SETTINGS = {
     enabled: true,
     showPlaceholder: true,
+    filterBlue: true,
+    filterGold: false,
+    filterGrey: false,
     whitelist: [],
   };
 
@@ -113,6 +157,11 @@
         background: rgba(29, 155, 240, 0.1);
         color: rgb(29, 155, 240); border-color: rgb(29, 155, 240);
       }
+      .xbf-hidden-cell {
+        display: none !important; height: 0 !important; min-height: 0 !important;
+        padding: 0 !important; margin: 0 !important; border: none !important;
+        overflow: hidden !important;
+      }
       .xbf-settings-panel {
         position: fixed; bottom: 20px; right: 20px; z-index: 99999;
         background: #15202b; color: #e7e9ea; border-radius: 12px;
@@ -148,6 +197,17 @@
       }
       .xbf-settings-panel .xbf-wl-remove {
         background: none; border: none; color: #f4212e; cursor: pointer; font-size: 14px;
+      }
+      .xbf-settings-panel .xbf-ie-row {
+        display: flex; gap: 6px; margin-top: 8px;
+      }
+      .xbf-settings-panel .xbf-ie-row button {
+        flex: 1; padding: 4px 10px; background: #1e2732; color: #8b98a5;
+        border: 1px solid #38444d; border-radius: 6px; font-size: 12px;
+        cursor: pointer; transition: background 0.2s, color 0.2s;
+      }
+      .xbf-settings-panel .xbf-ie-row button:hover {
+        background: rgba(29, 155, 240, 0.1); color: #1d9bf0; border-color: #1d9bf0;
       }
       .xbf-fab {
         position: fixed; bottom: 150px; right: 20px; z-index: 99998;
@@ -220,6 +280,8 @@
       userCache.set(user.handle, {
         following: user.following === true,
         name: typeof user.name === 'string' ? user.name : '',
+        isBlueVerified: user.isBlueVerified === true,
+        verifiedType: user.verifiedType || null,
       });
     }
     if (userCache.size > USER_CACHE_MAX) {
@@ -245,6 +307,8 @@
             handle,
             name: obj.legacy.name || '',
             following: obj.legacy.following === true,
+            isBlueVerified: obj.is_blue_verified === true,
+            verifiedType: obj.legacy.verified_type || obj.verified_type || null,
           });
         }
       }
@@ -261,6 +325,52 @@
       }
     }
     return results;
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Badge type detection and filtering
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function getBadgeType(userData) {
+    if (!userData) return 'blue';
+    if (userData.verifiedType === 'Business') return 'gold';
+    if (userData.verifiedType === 'Government') return 'grey';
+    if (userData.isBlueVerified) return 'blue';
+    return 'blue';
+  }
+
+  function shouldFilterBadgeType(badgeType) {
+    if (badgeType === 'blue') return settings.filterBlue !== false;
+    if (badgeType === 'gold') return settings.filterGold === true;
+    if (badgeType === 'grey') return settings.filterGrey === true;
+    return true;
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  RT/Repost detection
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function checkRepostByFollowed(article) {
+    const socialContext = article.querySelector(SELECTORS.socialContext);
+    if (!socialContext) return false;
+    const contextText = socialContext.textContent || '';
+    if (!contextText.includes('reposted') && !contextText.includes('\u30EA\u30DD\u30B9\u30C8')) return false;
+
+    const rtLink = socialContext.querySelector('a[role="link"]');
+    if (!rtLink) return false;
+    const rtHref = rtLink.getAttribute('href');
+    if (!rtHref || !rtHref.startsWith('/')) return false;
+    const rtHandle = rtHref.slice(1).toLowerCase().split('/')[0];
+    if (!rtHandle) return false;
+
+    // Check if RT author is followed
+    const rtUser = userCache.get(rtHandle);
+    if (rtUser && rtUser.following) return true;
+
+    // Check if RT author is whitelisted
+    if (settings.whitelist.includes(rtHandle)) return true;
+
+    return false;
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -359,8 +469,8 @@
     const btns = container.querySelectorAll('[role="button"]');
     for (const btn of btns) {
       const text = (btn.textContent || '').trim();
-      if (text === 'Follow' || (text === 'フォロー' && text.length === 4)) return false;
-      if (text === 'Following' || text === 'フォロー中') return true;
+      if (text === 'Follow' || (text === '\u30D5\u30A9\u30ED\u30FC' && text.length === 4)) return false;
+      if (text === 'Following' || text === '\u30D5\u30A9\u30ED\u30FC\u4E2D') return true;
     }
     return null;
   }
@@ -390,12 +500,12 @@
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //  Content Filter
-  //  Logic: badge present + not following + not whitelisted → hide
+  //  Logic: badge present + not following + not whitelisted + badge type enabled → hide
   //
   //  Processing strategy for zero-flash:
   //  Stage A (synchronous in MO callback): quick badge check
-  //    - No article → mark cell OK immediately
-  //    - Article, no badge → mark cell OK immediately
+  //    - No article -> mark cell OK immediately
+  //    - Article, no badge -> mark cell OK immediately
   //  Stage B (queueMicrotask): full follow/whitelist check
   //    - Runs before browser paint, but after MO callback
   //    - Decides hide or show
@@ -411,7 +521,7 @@
 
   function initFilter() {
     settings = Storage.get();
-    log('v2.5.0 | enabled=' + settings.enabled + ' | pre-hide active');
+    log('v2.6.0 | enabled=' + settings.enabled + ' | pre-hide active');
 
     if (!settings.enabled) {
       // Remove pre-hiding CSS if disabled
@@ -445,7 +555,7 @@
 
       // SPA navigation detection
       if (location.href !== lastUrl) {
-        log('SPA navigation: ' + lastUrl + ' → ' + location.href);
+        log('SPA navigation: ' + lastUrl + ' -> ' + location.href);
         lastUrl = location.href;
         setupObserver();
       }
@@ -455,7 +565,7 @@
     }, RESCAN_INTERVAL);
   }
 
-  // ── Safety valve: force-show cells stuck without data-xbf-ok ──
+  // -- Safety valve: force-show cells stuck without data-xbf-ok --
   function releaseStaleCells() {
     const now = Date.now();
     const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]:not([data-xbf-ok])');
@@ -500,7 +610,7 @@
         if (mutation.type === 'childList' && mutation.removedNodes.length > 0) {
           const cell = mutation.target.closest?.('[data-testid="cellInnerDiv"]');
           if (cell && cell.hasAttribute('data-xbf-ok')) {
-            // Content changed in a previously processed cell → re-process
+            // Content changed in a previously processed cell -> re-process
             cell.removeAttribute('data-xbf-ok');
             const article = cell.querySelector(SELECTORS.tweet)
               || cell.querySelector(SELECTORS.tweetFallback);
@@ -517,14 +627,8 @@
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  // ── Stage A: Synchronous quick check ──
-  // Runs inside MutationObserver callback (before browser paint).
-  // For each cellInnerDiv:
-  //   - No article → mark OK (non-tweet cell, show immediately)
-  //   - Article, no badge → mark OK (safe tweet, show immediately)
-  //   - Article + badge → defer to Stage B via queueMicrotask
+  // -- Stage A: Synchronous quick check --
   function processNewNode(node) {
-    // Collect cellInnerDiv elements
     const cells = [];
     if (node.matches?.('[data-testid="cellInnerDiv"]')) {
       cells.push(node);
@@ -545,7 +649,7 @@
         || cell.querySelector(SELECTORS.tweetFallback);
 
       if (!article) {
-        // Non-tweet cell (promotions, topics, etc.) → show immediately
+        // Non-tweet cell (promotions, topics, etc.) -> show immediately
         markCellOkDirect(cell);
         continue;
       }
@@ -555,14 +659,13 @@
         || article.querySelector(SELECTORS.verifiedBadgeFallback);
 
       if (!badge) {
-        // No badge → safe to show
+        // No badge -> safe to show
         article.dataset.xbfProcessed = 'true';
         markCellOkDirect(cell);
         continue;
       }
 
-      // Badge found → need full check (handle, follow, whitelist)
-      // Use queueMicrotask to avoid blocking but still run BEFORE paint
+      // Badge found -> need full check (handle, follow, whitelist, badge type, RT)
       queueMicrotask(() => {
         processVerifiedTweet(cell, article);
       });
@@ -579,17 +682,22 @@
     }
   }
 
-  // ── Stage B: Full verification for badge tweets ──
-  // Runs as microtask (before paint, after MO callback)
+  // -- Stage B: Full verification for badge tweets --
   function processVerifiedTweet(cell, article) {
     if (cell.hasAttribute('data-xbf-ok')) return;
+
+    // Skip inner (quoted) tweets
+    if (article.parentElement && article.parentElement.closest('article[data-testid="tweet"]')) {
+      article.dataset.xbfProcessed = 'true';
+      markCellOkDirect(cell);
+      return;
+    }
 
     badgeFoundCount++;
 
     // Extract handle
     const handle = extractHandle(article);
     if (!handle) {
-      // Can't extract handle yet → add to pending, keep hidden
       pendingTweets.add(article);
       return;
     }
@@ -625,12 +733,27 @@
       return;
     }
 
-    // Badge + not following + not whitelisted → hide
+    // RT/Repost check: if reposted by a followed/whitelisted user, show
+    if (checkRepostByFollowed(article)) {
+      article.dataset.xbfProcessed = 'true';
+      markCellOkDirect(cell);
+      return;
+    }
+
+    // Badge type filter check
+    const badgeType = getBadgeType(userData);
+    if (!shouldFilterBadgeType(badgeType)) {
+      article.dataset.xbfProcessed = 'true';
+      markCellOkDirect(cell);
+      return;
+    }
+
+    // Badge + not following + not whitelisted + not RT by followed + badge type filtered -> hide
     hideTweet(article, handle, cell);
     article.dataset.xbfProcessed = 'true';
   }
 
-  // ── Process existing cells (for initial load and periodic rescan) ──
+  // -- Process existing cells (for initial load and periodic rescan) --
   function processExistingCells() {
     const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]:not([data-xbf-ok])');
     for (const cell of cells) {
@@ -650,11 +773,18 @@
     }
   }
 
-  // ── Legacy processTweet (used by pending + rescan) ──
+  // -- Legacy processTweet (used by pending + rescan) --
   function processTweet(article) {
     if (!settings.enabled) return;
 
     const cell = article.closest(SELECTORS.cellInnerDiv);
+
+    // Skip inner (quoted) tweets
+    if (article.parentElement && article.parentElement.closest('article[data-testid="tweet"]')) {
+      article.dataset.xbfProcessed = 'true';
+      if (cell) markCellOkDirect(cell);
+      return;
+    }
 
     // React DOM reuse detection
     const currentKey = getTweetKey(article);
@@ -714,6 +844,21 @@
       return;
     }
 
+    // RT/Repost check
+    if (checkRepostByFollowed(article)) {
+      article.dataset.xbfProcessed = 'true';
+      if (cell) markCellOkDirect(cell);
+      return;
+    }
+
+    // Badge type filter check
+    const badgeType = getBadgeType(userData);
+    if (!shouldFilterBadgeType(badgeType)) {
+      article.dataset.xbfProcessed = 'true';
+      if (cell) markCellOkDirect(cell);
+      return;
+    }
+
     hideTweet(article, handle, cell);
     article.dataset.xbfProcessed = 'true';
   }
@@ -725,6 +870,7 @@
 
     const cell = article.closest(SELECTORS.cellInnerDiv) || article.parentElement;
     if (cell && cell.dataset?.xbfHidden === 'true') {
+      cell.classList.remove('xbf-hidden-cell');
       cell.style.display = cell.dataset.xbfOriginalDisplay || '';
       cell.dataset.xbfHidden = '';
       const placeholder = cell.querySelector('.xbf-placeholder');
@@ -780,8 +926,8 @@
       // Cell is visible (showing placeholder), mark OK to lift pre-hide
       markCellOkDirect(cell);
     } else {
-      // Cell completely hidden
-      cell.style.display = 'none';
+      // Complete hiding with !important CSS class
+      cell.classList.add('xbf-hidden-cell');
       // Still mark OK so pre-hide CSS doesn't conflict
       markCellOkDirect(cell);
     }
@@ -796,11 +942,12 @@
 
     const text = document.createElement('span');
     text.className = 'xbf-placeholder-text';
-    text.textContent = `@${handle} の投稿を非表示にしました`;
+    text.textContent = `@${handle} ${t('hiddenPost')}`;
 
     const showBtn = document.createElement('button');
-    showBtn.textContent = '表示';
+    showBtn.textContent = t('show');
     showBtn.addEventListener('click', () => {
+      container.classList.remove('xbf-hidden-cell');
       container.style.display = container.dataset?.xbfOriginalDisplay || '';
       article.style.display = '';
       placeholder.remove();
@@ -808,10 +955,11 @@
     });
 
     const wlBtn = document.createElement('button');
-    wlBtn.textContent = '常に表示';
+    wlBtn.textContent = t('alwaysShow');
     wlBtn.addEventListener('click', () => {
       Storage.addToWhitelist(handle);
       settings = Storage.get();
+      container.classList.remove('xbf-hidden-cell');
       container.style.display = container.dataset?.xbfOriginalDisplay || '';
       article.style.display = '';
       placeholder.remove();
@@ -822,6 +970,60 @@
     placeholder.appendChild(showBtn);
     placeholder.appendChild(wlBtn);
     return placeholder;
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //  Whitelist Export/Import
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  function exportWhitelist() {
+    const data = JSON.stringify(settings.whitelist, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'xbf-whitelist.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function importWhitelist(renderCallback) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const imported = JSON.parse(reader.result);
+          if (!Array.isArray(imported)) {
+            log('Import failed: not an array');
+            return;
+          }
+          // Merge: add new handles that don't already exist
+          for (const h of imported) {
+            if (typeof h === 'string') {
+              const normalized = h.replace(/^@/, '').toLowerCase();
+              if (!settings.whitelist.includes(normalized)) {
+                settings.whitelist.push(normalized);
+              }
+            }
+          }
+          Storage.set(settings);
+          if (renderCallback) renderCallback();
+          resetAndReprocess();
+          log('Imported ' + imported.length + ' whitelist entries');
+        } catch (e) {
+          log('Import parse error:', e);
+        }
+      };
+      reader.readAsText(file);
+    });
+    input.click();
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -854,7 +1056,7 @@
     panel.className = 'xbf-settings-panel';
 
     const title = document.createElement('h3');
-    title.textContent = 'X Badge Filter v2.5';
+    title.textContent = 'X Badge Filter v2.6.0';
     panel.appendChild(title);
 
     const closeBtn = document.createElement('button');
@@ -863,7 +1065,8 @@
     closeBtn.addEventListener('click', togglePanel);
     panel.appendChild(closeBtn);
 
-    panel.appendChild(createToggle('enabled', 'フィルター ON/OFF', settings.enabled, (v) => {
+    // -- Filter ON/OFF toggle --
+    panel.appendChild(createToggle('enabled', t('filterOn'), settings.enabled, (v) => {
       settings.enabled = v;
       Storage.set(settings);
       if (v) {
@@ -873,7 +1076,6 @@
       } else {
         removePreHideCSS();
         showAllHidden();
-        // Also reveal any pre-hidden cells
         document.querySelectorAll('[data-testid="cellInnerDiv"]:not([data-xbf-ok])').forEach(c => {
           markCellOkDirect(c);
         });
@@ -881,15 +1083,41 @@
       }
     }));
 
+    // -- Display section --
     const dispSection = document.createElement('div');
     dispSection.className = 'xbf-section';
-    dispSection.appendChild(createToggle('showPlaceholder', '非表示バーを表示', settings.showPlaceholder, (v) => { settings.showPlaceholder = v; Storage.set(settings); }));
+    dispSection.appendChild(createToggle('showPlaceholder', t('showPlaceholder'), settings.showPlaceholder, (v) => {
+      settings.showPlaceholder = v;
+      Storage.set(settings);
+    }));
     panel.appendChild(dispSection);
 
+    // -- Badge type filter section --
+    const badgeSection = document.createElement('div');
+    badgeSection.className = 'xbf-section';
+
+    badgeSection.appendChild(createToggle('filterBlue', t('filterBlue'), settings.filterBlue, (v) => {
+      settings.filterBlue = v;
+      Storage.set(settings);
+      resetAndReprocess();
+    }));
+    badgeSection.appendChild(createToggle('filterGold', t('filterGold'), settings.filterGold, (v) => {
+      settings.filterGold = v;
+      Storage.set(settings);
+      resetAndReprocess();
+    }));
+    badgeSection.appendChild(createToggle('filterGrey', t('filterGrey'), settings.filterGrey, (v) => {
+      settings.filterGrey = v;
+      Storage.set(settings);
+      resetAndReprocess();
+    }));
+    panel.appendChild(badgeSection);
+
+    // -- Whitelist section --
     const wlSection = document.createElement('div');
     wlSection.className = 'xbf-section';
     const wlTitle = document.createElement('div');
-    wlTitle.textContent = 'ホワイトリスト';
+    wlTitle.textContent = t('whitelist');
     wlTitle.style.cssText = 'font-size:12px;color:#8b98a5;margin-bottom:6px;';
     wlSection.appendChild(wlTitle);
 
@@ -900,7 +1128,7 @@
     wlInput.placeholder = '@handle';
     wlInput.spellcheck = false;
     const wlAddBtn = document.createElement('button');
-    wlAddBtn.textContent = '追加';
+    wlAddBtn.textContent = t('add');
 
     const wlList = document.createElement('div');
     wlList.style.cssText = 'max-height:100px;overflow-y:auto;margin-top:6px;';
@@ -943,6 +1171,20 @@
     wlRow.appendChild(wlAddBtn);
     wlSection.appendChild(wlRow);
     wlSection.appendChild(wlList);
+
+    // -- Export/Import buttons --
+    const ieRow = document.createElement('div');
+    ieRow.className = 'xbf-ie-row';
+    const exportBtn = document.createElement('button');
+    exportBtn.textContent = t('exportBtn');
+    exportBtn.addEventListener('click', exportWhitelist);
+    const importBtn = document.createElement('button');
+    importBtn.textContent = t('importBtn');
+    importBtn.addEventListener('click', () => importWhitelist(renderWhitelist));
+    ieRow.appendChild(exportBtn);
+    ieRow.appendChild(importBtn);
+    wlSection.appendChild(ieRow);
+
     panel.appendChild(wlSection);
 
     // Debug info
@@ -1003,6 +1245,7 @@
 
   function showAllHidden() {
     document.querySelectorAll('[data-xbf-hidden="true"]').forEach(el => {
+      el.classList.remove('xbf-hidden-cell');
       el.style.display = el.dataset.xbfOriginalDisplay || '';
       const article = el.querySelector(SELECTORS.tweet) || el.querySelector(SELECTORS.tweetFallback);
       if (article) { article.style.display = ''; article.dataset.xbfProcessed = ''; }
@@ -1015,6 +1258,7 @@
   }
 
   function resetAndReprocess() {
+    // Save current hiddenCount context - showAllHidden resets to 0
     showAllHidden();
     document.querySelectorAll('[data-xbf-ok]').forEach(el => {
       el.removeAttribute('data-xbf-ok');
@@ -1026,6 +1270,7 @@
     pendingTweets.clear();
     badgeFoundCount = 0;
     followSkipCount = 0;
+    // hiddenCount is already 0 from showAllHidden, will re-accumulate from processExistingCells
     processExistingCells();
   }
 
