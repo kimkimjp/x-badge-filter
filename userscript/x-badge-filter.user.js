@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Badge Filter
 // @namespace    https://ultrathink.jp
-// @version      2.6.0
+// @version      2.7.0
 // @description  Hide tweets from non-followed verified accounts on X/Twitter timeline
 // @author       kimkimjp
 // @match        https://x.com/*
@@ -238,6 +238,8 @@
 
   const userCache = new Map();
   let apiAvailable = false;
+  let existingCellsProcessed = false;
+  let deferUnknown = true; // defer filtering when follow status is unknown
 
   function setupFetchIntercept() {
     try {
@@ -274,6 +276,7 @@
   }
 
   function receiveApiUsers(users) {
+    const wasFirstBatch = !apiAvailable;
     apiAvailable = true;
     for (const user of users) {
       if (typeof user.handle !== 'string' || !user.handle) continue;
@@ -289,7 +292,13 @@
       const iter = userCache.keys();
       for (let i = 0; i < excess; i++) userCache.delete(iter.next().value);
     }
+    // On first API data, process existing cells with full cache
+    if (wasFirstBatch && !existingCellsProcessed) {
+      existingCellsProcessed = true;
+      processExistingCells();
+    }
     processPendingTweets();
+    revalidateHiddenTweets();
   }
 
   function extractUsersFromApi(rootObj) {
@@ -521,7 +530,7 @@
 
   function initFilter() {
     settings = Storage.get();
-    log('v2.6.0 | enabled=' + settings.enabled + ' | pre-hide active');
+    log('v2.7.0 | enabled=' + settings.enabled + ' | pre-hide active');
 
     if (!settings.enabled) {
       // Remove pre-hiding CSS if disabled
@@ -546,8 +555,27 @@
     injectStyles();
     setupUI();
     setupObserver();
-    processExistingCells();
+    // Don't process existing cells immediately — wait for first API data.
     lastUrl = location.href;
+
+    // After 5s, stop deferring and process remaining pending tweets
+    setTimeout(() => {
+      deferUnknown = false;
+      if (!existingCellsProcessed) {
+        existingCellsProcessed = true;
+        processExistingCells();
+      }
+      if (pendingTweets.size > 0) {
+        const tweets = new Set(pendingTweets);
+        pendingTweets.clear();
+        for (const article of tweets) {
+          if (document.contains(article)) {
+            article.dataset.xbfProcessed = '';
+            processTweet(article);
+          }
+        }
+      }
+    }, 5000);
 
     // Periodic re-scan + safety timeout for unprocessed cells
     setInterval(() => {
@@ -717,11 +745,11 @@
       following = userData.following;
     } else {
       following = detectFollowFromDom(article, handle);
-      if (following === null && apiAvailable) {
-        pendingTweets.add(article);
-        return;
-      }
       if (following === null) {
+        if (deferUnknown) {
+          pendingTweets.add(article);
+          return;
+        }
         following = false;
       }
     }
@@ -828,11 +856,11 @@
       following = userData.following;
     } else {
       following = detectFollowFromDom(article, handle);
-      if (following === null && apiAvailable) {
-        pendingTweets.add(article);
-        return;
-      }
       if (following === null) {
+        if (deferUnknown) {
+          pendingTweets.add(article);
+          return;
+        }
         following = false;
       }
     }
@@ -879,6 +907,33 @@
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ── Revalidate hidden tweets when new API data arrives ──
+  // Safety net: restore tweets that were incorrectly hidden before API data was available
+  function revalidateHiddenTweets() {
+    document.querySelectorAll('[data-xbf-hidden="true"]').forEach(cell => {
+      const handle = cell.dataset.xbfHandle;
+      if (!handle) return;
+
+      const userData = userCache.get(handle);
+      if (!userData) return;
+
+      if (userData.following) {
+        const article = cell.querySelector(SELECTORS.tweet) || cell.querySelector(SELECTORS.tweetFallback);
+        cell.classList.remove('xbf-hidden-cell');
+        cell.style.display = cell.dataset.xbfOriginalDisplay || '';
+        if (article) {
+          article.style.display = '';
+          article.dataset.xbfProcessed = 'true';
+        }
+        const placeholder = cell.querySelector('.xbf-placeholder');
+        if (placeholder) placeholder.remove();
+        cell.dataset.xbfHidden = 'false';
+        if (hiddenCount > 0) hiddenCount--;
+        updateFabCount();
+      }
+    });
+  }
+
   //  Hide tweet - with container fallback
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Badge Filter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Hide tweets from non-followed verified accounts on X/Twitter timeline",
   "permissions": [
     "storage"

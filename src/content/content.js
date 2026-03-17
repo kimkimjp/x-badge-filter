@@ -19,6 +19,8 @@
   let processingScheduled = false;
   let pendingNodes = [];
   let apiAvailable = false;
+  let existingTweetsProcessed = false;
+  let deferUnknown = true; // defer filtering when follow status is unknown
 
   // ── Initialize ──
   async function init() {
@@ -29,12 +31,18 @@
 
     if (!settings.enabled) return;
     setupObserver();
-    processExistingTweets();
+    // Don't process existing tweets immediately — wait for first API data.
+    // The observer will queue new tweets as pending until API data arrives.
 
-    // Timeout: if API interceptor hasn't sent data after 3s,
-    // re-process pending tweets using DOM-based fallback.
+    // Timeout: if API interceptor hasn't sent data after 5s,
+    // stop deferring and process all pending tweets with DOM fallback.
     setTimeout(() => {
-      if (!apiAvailable && pendingTweets.size > 0) {
+      deferUnknown = false;
+      if (!existingTweetsProcessed) {
+        existingTweetsProcessed = true;
+        processExistingTweets();
+      }
+      if (pendingTweets.size > 0) {
         const tweets = new Set(pendingTweets);
         pendingTweets.clear();
         for (const article of tweets) {
@@ -44,7 +52,7 @@
           }
         }
       }
-    }, 3000);
+    }, 5000);
   }
 
   // ── Listen for API interceptor data via postMessage ──
@@ -54,6 +62,7 @@
       if (!e.data || e.data.type !== MSG_TYPE) return;
       if (!Array.isArray(e.data.users)) return;
 
+      const wasFirstBatch = !apiAvailable;
       apiAvailable = true;
 
       for (const user of e.data.users) {
@@ -76,7 +85,14 @@
         }
       }
 
+      // On first API data batch, process existing tweets with full cache
+      if (wasFirstBatch && !existingTweetsProcessed) {
+        existingTweetsProcessed = true;
+        processExistingTweets();
+      }
+
       processPendingTweets();
+      revalidateHiddenTweets();
     });
   }
 
@@ -205,11 +221,13 @@
     } else {
       following = detectFollowFromDom(article);
 
-      if (following === null && apiAvailable) {
-        pendingTweets.add(article);
-        return;
-      }
       if (following === null) {
+        if (deferUnknown) {
+          // Follow status unknown — defer until API data arrives
+          pendingTweets.add(article);
+          return;
+        }
+        // After timeout: default to not-following (DOM couldn't determine)
         following = false;
       }
     }
@@ -338,6 +356,27 @@
 
     hiddenCount++;
     updateBadgeCount();
+  }
+
+  // ── Revalidate hidden tweets when new API data arrives ──
+  // Safety net: restore tweets that were incorrectly hidden before API data was available
+  function revalidateHiddenTweets() {
+    document.querySelectorAll('[data-xbf-hidden="true"]').forEach(cell => {
+      const handle = cell.dataset.xbfHandle;
+      if (!handle) return;
+
+      const userData = userCache.get(handle);
+      if (!userData) return;
+
+      // If the user is actually followed, restore the tweet
+      if (userData.following) {
+        const article = cell.querySelector(XBF_SELECTORS.tweet);
+        const placeholder = cell.querySelector('.xbf-placeholder');
+        restoreCell(cell, article, placeholder);
+        if (article) article.dataset.xbfProcessed = 'true';
+        if (hiddenCount > 0) hiddenCount--;
+      }
+    });
   }
 
   function restoreCell(cell, article, placeholder) {
